@@ -16,7 +16,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
     add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-add_executable(minidec src/main.cpp)
+add_executable(minidec
+    src/main.cpp
+    src/cli.cpp
+)
 target_include_directories(minidec PRIVATE include)
 
 enable_testing()
