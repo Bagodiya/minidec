@@ -2,6 +2,28 @@
 
 namespace minidec {
 
+std::string version_string() {
+    return "minidec 0.0.1";
+}
+
+std::string help_text() {
+    // Keep this in sync with the subcommands as they get added. For now only the
+    // skeleton exists, so we just advertise what's planned.
+    std::string out;
+    out += "usage: minidec <command> [options]\n";
+    out += "\n";
+    out += "commands:\n";
+    out += "  symbols     list the symbols in a binary\n";
+    out += "  disasm      disassemble a function\n";
+    out += "  cfg         show a function's control-flow graph\n";
+    out += "  decompile   emit C-like pseudocode for a function\n";
+    out += "\n";
+    out += "options:\n";
+    out += "  --version   print the version and exit\n";
+    out += "  --help      print this help and exit\n";
+    return out;
+}
+
 bool ParsedArgs::has_option(const std::string& name) const {
     return options.find(name) != options.end();
 }

@@ -24,6 +24,13 @@ struct ParsedArgs {
 // case the flag is recorded with an empty value.
 ParsedArgs parse_args(int argc, char* argv[]);
 
+// "minidec <version>" — what --version prints.
+std::string version_string();
+
+// The text printed for --help (and when no command is given): a usage line plus
+// the list of available subcommands.
+std::string help_text();
+
 }  // namespace minidec
 
 #endif  // MINIDEC_CLI_H

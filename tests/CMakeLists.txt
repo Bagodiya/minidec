@@ -9,6 +9,8 @@ FetchContent_MakeAvailable(Catch2)
 
 add_executable(minidec_tests
     test_smoke.cpp
+    test_cli.cpp
+    ${CMAKE_SOURCE_DIR}/src/cli.cpp
 )
 target_link_libraries(minidec_tests PRIVATE Catch2::Catch2WithMain)
 target_include_directories(minidec_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
