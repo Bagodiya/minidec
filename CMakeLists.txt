@@ -50,6 +50,19 @@ else()
         "  ubuntu: sudo apt install libcapstone-dev")
 endif()
 
+# LIEF handles the ELF/Mach-O parsing in phase 2. It ships its own cmake
+# config, so find_package picks up the imported target on both Homebrew and
+# apt installs. Same idea as capstone above: check now, fail with a hint.
+find_package(LIEF QUIET CONFIG)
+if(LIEF_FOUND)
+    message(STATUS "minidec: found LIEF ${LIEF_VERSION}")
+else()
+    message(FATAL_ERROR
+        "LIEF not found. install it and re-run cmake:\n"
+        "  macOS:  brew install lief\n"
+        "  ubuntu: sudo apt install liblief-dev")
+endif()
+
 add_executable(minidec
     src/main.cpp
     src/cli.cpp
