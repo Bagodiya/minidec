@@ -71,3 +71,6 @@ target_include_directories(minidec PRIVATE include)
 
 enable_testing()
 add_subdirectory(tests)
+
+# opt-in target that builds the sample programs in examples/c
+add_subdirectory(examples)
