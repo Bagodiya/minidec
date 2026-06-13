@@ -55,6 +55,8 @@ struct Binary {
     Format format = Format::Unknown;
     std::string path;  // path the binary was loaded from
     std::uint64_t entry_point = 0;
+    std::uint64_t file_size = 0;  // size of the file on disk, in bytes
+    std::string arch;             // target architecture, e.g. "x86_64"; empty if unknown
     std::vector<Section> sections;
     std::vector<Symbol> symbols;
 

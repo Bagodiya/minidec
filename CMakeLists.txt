@@ -50,6 +50,12 @@ else()
         "  ubuntu: sudo apt install libcapstone-dev")
 endif()
 
+# LIEF's shared config lists tl::expected in its public link interface but only
+# pulls that target in for static builds, so resolve it ourselves first. Harmless
+# when LIEF doesn't need it; without it the shared build trips a missing-target
+# error the moment anything links LIEF::LIEF.
+find_package(tl-expected QUIET CONFIG)
+
 # LIEF handles the ELF/Mach-O parsing in phase 2. It ships its own cmake
 # config, so find_package picks up the imported target on both Homebrew and
 # apt installs. Same idea as capstone above: check now, fail with a hint.
@@ -66,8 +72,10 @@ endif()
 add_executable(minidec
     src/main.cpp
     src/cli.cpp
+    src/elf_loader.cpp
 )
 target_include_directories(minidec PRIVATE include)
+target_link_libraries(minidec PRIVATE LIEF::LIEF)
 
 enable_testing()
 add_subdirectory(tests)
