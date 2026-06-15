@@ -6,6 +6,7 @@
 #include <LIEF/Abstract/Header.hpp>
 #include <LIEF/ELF/Binary.hpp>
 #include <LIEF/ELF/Parser.hpp>
+#include <LIEF/ELF/Section.hpp>
 
 namespace minidec {
 
@@ -40,6 +41,27 @@ std::uint64_t file_size_on_disk(const std::string& path) {
     return static_cast<std::uint64_t>(in.tellg());
 }
 
+// Pull every section out of the parsed ELF and turn it into our own Section
+// type. We copy the bytes across so the rest of the program doesn't have to
+// keep the LIEF object alive. Sections like .bss carry no data on disk, so
+// content() comes back empty there and bytes just stays empty too.
+std::vector<Section> read_sections(const LIEF::ELF::Binary& elf) {
+    std::vector<Section> out;
+    for (const LIEF::ELF::Section& sec : elf.sections()) {
+        Section s;
+        s.name = sec.name();
+        s.address = sec.virtual_address();
+        s.size = sec.size();
+        s.file_offset = sec.file_offset();
+
+        auto content = sec.content();
+        s.bytes.assign(content.begin(), content.end());
+
+        out.push_back(std::move(s));
+    }
+    return out;
+}
+
 }  // namespace
 
 std::optional<Binary> load_elf(const std::string& path) {
@@ -58,6 +80,8 @@ std::optional<Binary> load_elf(const std::string& path) {
     // through the abstract one to get the architecture in a format-agnostic way.
     LIEF::Header header = LIEF::Header::from(*elf);
     bin.arch = arch_name(header.architecture());
+
+    bin.sections = read_sections(*elf);
 
     return bin;
 }
