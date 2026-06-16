@@ -7,6 +7,7 @@
 #include <LIEF/ELF/Binary.hpp>
 #include <LIEF/ELF/Parser.hpp>
 #include <LIEF/ELF/Section.hpp>
+#include <LIEF/ELF/Symbol.hpp>
 
 namespace minidec {
 
@@ -62,6 +63,42 @@ std::vector<Section> read_sections(const LIEF::ELF::Binary& elf) {
     return out;
 }
 
+// Boil LIEF's symbol type down to the three buckets we care about. The ELF spec
+// has more (sections, files, TLS, ...) but for decompilation we only really need
+// to know "is this code or is this data", so the rest lands in Other.
+SymbolKind classify(LIEF::ELF::Symbol::TYPE type) {
+    switch (type) {
+        case LIEF::ELF::Symbol::TYPE::FUNC:
+        case LIEF::ELF::Symbol::TYPE::GNU_IFUNC:
+            return SymbolKind::Function;
+        case LIEF::ELF::Symbol::TYPE::OBJECT:
+            return SymbolKind::Object;
+        default:
+            return SymbolKind::Other;
+    }
+}
+
+// Walk the symbol table and copy out the entries that are useful to us.
+// symbols() covers both the static (.symtab) and dynamic (.dynsym) tables.
+// We drop the nameless ones up front -- things like section and file symbols
+// show up with no name and there's nothing the later passes can do with them,
+// plus symbol_by_name would never match them anyway.
+std::vector<Symbol> read_symbols(const LIEF::ELF::Binary& elf) {
+    std::vector<Symbol> out;
+    for (const LIEF::ELF::Symbol& sym : elf.symbols()) {
+        if (sym.name().empty()) {
+            continue;
+        }
+        Symbol s;
+        s.name = sym.name();
+        s.address = sym.value();
+        s.size = sym.size();
+        s.kind = classify(sym.type());
+        out.push_back(std::move(s));
+    }
+    return out;
+}
+
 }  // namespace
 
 std::optional<Binary> load_elf(const std::string& path) {
@@ -82,6 +119,7 @@ std::optional<Binary> load_elf(const std::string& path) {
     bin.arch = arch_name(header.architecture());
 
     bin.sections = read_sections(*elf);
+    bin.symbols = read_symbols(*elf);
 
     return bin;
 }
