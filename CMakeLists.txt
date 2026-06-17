@@ -73,6 +73,7 @@ add_executable(minidec
     src/main.cpp
     src/cli.cpp
     src/elf_loader.cpp
+    src/macho_loader.cpp
 )
 target_include_directories(minidec PRIVATE include)
 target_link_libraries(minidec PRIVATE LIEF::LIEF)
