@@ -31,6 +31,11 @@ std::string version_string();
 // the list of available subcommands.
 std::string help_text();
 
+// Hand a parsed command line off to the matching subcommand and return its exit
+// code. The caller deals with --version, --help, and the no-command case before
+// getting here; an unrecognized command prints an error and returns non-zero.
+int run(const ParsedArgs& args);
+
 }  // namespace minidec
 
 #endif  // MINIDEC_CLI_H

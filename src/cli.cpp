@@ -1,5 +1,9 @@
 #include "minidec/cli.h"
 
+#include <iostream>
+
+#include "minidec/commands.h"
+
 namespace minidec {
 
 std::string version_string() {
@@ -65,6 +69,16 @@ ParsedArgs parse_args(int argc, char* argv[]) {
     }
 
     return result;
+}
+
+int run(const ParsedArgs& args) {
+    if (args.command == "symbols") {
+        return cmd_symbols(args);
+    }
+
+    std::cerr << "unknown command: " << args.command << "\n";
+    std::cerr << "run 'minidec --help' to see the available commands\n";
+    return 1;
 }
 
 }  // namespace minidec

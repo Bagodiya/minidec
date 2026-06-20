@@ -16,14 +16,5 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    // For now just echo back what we parsed. Real subcommands come later.
-    std::cout << "command: " << args.command << std::endl;
-    for (const auto& pos : args.positionals) {
-        std::cout << "  arg: " << pos << std::endl;
-    }
-    for (const auto& opt : args.options) {
-        std::cout << "  --" << opt.first << " = " << opt.second << std::endl;
-    }
-
-    return 0;
+    return minidec::run(args);
 }
