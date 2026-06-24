@@ -6,6 +6,7 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "minidec/loader.h"
 
@@ -32,6 +33,18 @@ std::string format_addr(std::uint64_t addr) {
     return std::string(buf);
 }
 
+// Find the code section. On ELF it's plain ".text"; on Mach-O the name carries
+// the segment too ("__TEXT,__text"), so we just look for the "__text" part.
+// Returns nullptr if neither shows up.
+const Section* find_text_section(const Binary& bin) {
+    for (const Section& sec : bin.sections) {
+        if (sec.name == ".text" || sec.name.find("__text") != std::string::npos) {
+            return &sec;
+        }
+    }
+    return nullptr;
+}
+
 }  // namespace
 
 int cmd_symbols(const ParsedArgs& args) {
@@ -53,16 +66,35 @@ int cmd_symbols(const ParsedArgs& args) {
         return 0;
     }
 
+    // By default we only care about code symbols, so keep the ones that land in
+    // the text section. Pass --all to dump everything. If we can't find a text
+    // section there's nothing to filter against, so we fall back to showing all.
+    bool show_all = args.has_option("all");
+    const Section* text = show_all ? nullptr : find_text_section(*bin);
+
+    std::vector<const Symbol*> shown;
+    for (const Symbol& sym : bin->symbols) {
+        if (text && !text->contains(sym.address)) {
+            continue;
+        }
+        shown.push_back(&sym);
+    }
+
+    if (shown.empty()) {
+        std::cout << "no symbols in text section (use --all to list every symbol)\n";
+        return 0;
+    }
+
     // The address column is a fixed width, but size and type vary depending on
     // the binary, so walk the symbols once and remember the widest value in each
     // column before we print anything. Name goes last so it doesn't need padding.
     std::size_t addr_w = std::string("ADDRESS").size();
     std::size_t size_w = std::string("SIZE").size();
     std::size_t type_w = std::string("TYPE").size();
-    for (const Symbol& sym : bin->symbols) {
-        addr_w = std::max(addr_w, format_addr(sym.address).size());
-        size_w = std::max(size_w, std::to_string(sym.size).size());
-        type_w = std::max(type_w, std::string(kind_label(sym.kind)).size());
+    for (const Symbol* sym : shown) {
+        addr_w = std::max(addr_w, format_addr(sym->address).size());
+        size_w = std::max(size_w, std::to_string(sym->size).size());
+        type_w = std::max(type_w, std::string(kind_label(sym->kind)).size());
     }
 
     std::cout << std::left << std::setw(static_cast<int>(addr_w)) << "ADDRESS" << "  "
@@ -70,11 +102,11 @@ int cmd_symbols(const ParsedArgs& args) {
               << std::left << std::setw(static_cast<int>(type_w)) << "TYPE" << "  "
               << "NAME" << "\n";
 
-    for (const Symbol& sym : bin->symbols) {
-        std::cout << std::left << std::setw(static_cast<int>(addr_w)) << format_addr(sym.address)
-                  << "  " << std::right << std::setw(static_cast<int>(size_w)) << sym.size << "  "
-                  << std::left << std::setw(static_cast<int>(type_w)) << kind_label(sym.kind)
-                  << "  " << sym.name << "\n";
+    for (const Symbol* sym : shown) {
+        std::cout << std::left << std::setw(static_cast<int>(addr_w)) << format_addr(sym->address)
+                  << "  " << std::right << std::setw(static_cast<int>(size_w)) << sym->size << "  "
+                  << std::left << std::setw(static_cast<int>(type_w)) << kind_label(sym->kind)
+                  << "  " << sym->name << "\n";
     }
 
     return 0;
