@@ -72,16 +72,27 @@ int cmd_symbols(const ParsedArgs& args) {
     bool show_all = args.has_option("all");
     const Section* text = show_all ? nullptr : find_text_section(*bin);
 
+    // Optional name filter: --filter <substr> keeps only the symbols whose name
+    // contains the substring. Empty means no filtering at all.
+    std::string name_filter = args.option("filter");
+
     std::vector<const Symbol*> shown;
     for (const Symbol& sym : bin->symbols) {
         if (text && !text->contains(sym.address)) {
+            continue;
+        }
+        if (!name_filter.empty() && sym.name.find(name_filter) == std::string::npos) {
             continue;
         }
         shown.push_back(&sym);
     }
 
     if (shown.empty()) {
-        std::cout << "no symbols in text section (use --all to list every symbol)\n";
+        if (!name_filter.empty()) {
+            std::cout << "no symbols match '" << name_filter << "'\n";
+        } else {
+            std::cout << "no symbols in text section (use --all to list every symbol)\n";
+        }
         return 0;
     }
 
