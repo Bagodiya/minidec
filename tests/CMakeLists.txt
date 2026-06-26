@@ -10,6 +10,7 @@ FetchContent_MakeAvailable(Catch2)
 add_executable(minidec_tests
     test_smoke.cpp
     test_cli.cpp
+    test_binary.cpp
     ${CMAKE_SOURCE_DIR}/src/cli.cpp
     ${CMAKE_SOURCE_DIR}/src/cmd_symbols.cpp
     ${CMAKE_SOURCE_DIR}/src/elf_loader.cpp
@@ -17,6 +18,10 @@ add_executable(minidec_tests
 )
 target_link_libraries(minidec_tests PRIVATE Catch2::Catch2WithMain LIEF::LIEF)
 target_include_directories(minidec_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# Let test_binary.cpp locate the checked-in fixtures regardless of cwd.
+target_compile_definitions(minidec_tests PRIVATE
+    MINIDEC_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 
 list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 include(Catch)
