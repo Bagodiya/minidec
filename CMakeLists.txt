@@ -34,6 +34,11 @@ if(NOT CAPSTONE_FOUND)
         PATHS /usr/local/opt/capstone/lib /opt/homebrew/opt/capstone/lib)
     if(CAPSTONE_INCLUDE_DIR AND CAPSTONE_LIBRARY)
         set(CAPSTONE_FOUND TRUE)
+        # pkg-config hands these back as the plural *_DIRS / *_LIBRARIES vars, so
+        # mirror the manual find into the same names. That way everything below
+        # links the same way no matter which branch found capstone.
+        set(CAPSTONE_INCLUDE_DIRS ${CAPSTONE_INCLUDE_DIR})
+        set(CAPSTONE_LIBRARIES ${CAPSTONE_LIBRARY})
     endif()
 endif()
 
@@ -75,9 +80,10 @@ add_executable(minidec
     src/cmd_symbols.cpp
     src/elf_loader.cpp
     src/macho_loader.cpp
+    src/disasm.cpp
 )
-target_include_directories(minidec PRIVATE include)
-target_link_libraries(minidec PRIVATE LIEF::LIEF)
+target_include_directories(minidec PRIVATE include ${CAPSTONE_INCLUDE_DIRS})
+target_link_libraries(minidec PRIVATE LIEF::LIEF ${CAPSTONE_LIBRARIES})
 
 enable_testing()
 add_subdirectory(tests)
