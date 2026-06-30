@@ -12,6 +12,10 @@ Disassembler::Disassembler() {
     // success; on failure we just leave opened_ false and let callers notice via
     // is_open() instead of throwing.
     if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) == CS_ERR_OK) {
+        // Turn on detail mode so each decoded instruction carries its group
+        // membership (call, jump, ret, ...). Without this cs_insn_group has
+        // nothing to read and every instruction looks like a plain one.
+        cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
         handle_ = static_cast<std::size_t>(handle);
         opened_ = true;
     }
@@ -70,6 +74,16 @@ std::vector<Instruction> Disassembler::disassemble(const std::uint8_t* code, std
         decoded.bytes.assign(in.bytes, in.bytes + in.size);
         decoded.mnemonic = in.mnemonic;
         decoded.op_str = in.op_str;
+
+        // cs_insn_group only works when detail is on, which we set in the ctor.
+        // CS_GRP_JUMP covers both jmp and the conditional jcc family, and
+        // CS_GRP_BRANCH_RELATIVE tells us the target is a relative offset baked
+        // into the encoding (i.e. a direct branch we can resolve to a symbol).
+        decoded.is_call = cs_insn_group(handle, &in, CS_GRP_CALL);
+        decoded.is_jump = cs_insn_group(handle, &in, CS_GRP_JUMP);
+        decoded.is_ret = cs_insn_group(handle, &in, CS_GRP_RET);
+        decoded.is_relative = cs_insn_group(handle, &in, CS_GRP_BRANCH_RELATIVE);
+
         out.push_back(std::move(decoded));
     }
 

@@ -18,6 +18,18 @@ struct Instruction {
     std::vector<std::uint8_t> bytes;    // the raw encoded bytes
     std::string mnemonic;               // e.g. "mov", "call", "ret"
     std::string op_str;                 // the operand text, e.g. "rax, rbx"
+
+    // Control-flow classification, filled in from capstone's instruction
+    // groups. We pull these out now so the CFG and the output steps later on
+    // can ask "is this a branch?" without re-parsing the mnemonic string.
+    bool is_call = false;       // call instruction
+    bool is_jump = false;       // jmp / jcc of any kind
+    bool is_ret = false;        // ret / retf
+    bool is_relative = false;   // target is a pc-relative offset (direct branch)
+
+    // Convenience: anything that can move control flow somewhere other than the
+    // next instruction. Handy when grouping instructions into basic blocks.
+    bool is_branch() const { return is_call || is_jump || is_ret; }
 };
 
 // Thin RAII wrapper around a capstone handle. Opening capstone allocates state
