@@ -13,11 +13,13 @@ add_executable(minidec_tests
     test_binary.cpp
     ${CMAKE_SOURCE_DIR}/src/cli.cpp
     ${CMAKE_SOURCE_DIR}/src/cmd_symbols.cpp
+    ${CMAKE_SOURCE_DIR}/src/cmd_disasm.cpp
+    ${CMAKE_SOURCE_DIR}/src/disasm.cpp
     ${CMAKE_SOURCE_DIR}/src/elf_loader.cpp
     ${CMAKE_SOURCE_DIR}/src/macho_loader.cpp
 )
-target_link_libraries(minidec_tests PRIVATE Catch2::Catch2WithMain LIEF::LIEF)
-target_include_directories(minidec_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(minidec_tests PRIVATE Catch2::Catch2WithMain LIEF::LIEF ${CAPSTONE_LIBRARIES})
+target_include_directories(minidec_tests PRIVATE ${CMAKE_SOURCE_DIR}/include ${CAPSTONE_INCLUDE_DIRS})
 
 # Let test_binary.cpp locate the checked-in fixtures regardless of cwd.
 target_compile_definitions(minidec_tests PRIVATE

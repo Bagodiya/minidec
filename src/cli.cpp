@@ -75,6 +75,9 @@ int run(const ParsedArgs& args) {
     if (args.command == "symbols") {
         return cmd_symbols(args);
     }
+    if (args.command == "disasm") {
+        return cmd_disasm(args);
+    }
 
     std::cerr << "unknown command: " << args.command << "\n";
     std::cerr << "run 'minidec --help' to see the available commands\n";
