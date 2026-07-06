@@ -1,6 +1,8 @@
 #include "minidec/commands.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <iomanip>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -19,6 +21,23 @@ std::string format_addr(std::uint64_t addr) {
     char buf[17];
     std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(addr));
     return std::string(buf);
+}
+
+// Turn the raw instruction bytes into "48 89 e5" style hex, one space between
+// bytes. objdump prints them this way and it's handy when you want to eyeball
+// the encoding, so we do the same.
+std::string format_bytes(const std::vector<std::uint8_t>& bytes) {
+    std::string out;
+    out.reserve(bytes.size() * 3);
+    char pair[3];
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+        if (i != 0) {
+            out += ' ';
+        }
+        std::snprintf(pair, sizeof(pair), "%02x", bytes[i]);
+        out += pair;
+    }
+    return out;
 }
 
 // Find the code section. ELF calls it ".text", Mach-O names it "__TEXT,__text",
@@ -109,13 +128,28 @@ int cmd_disasm(const ParsedArgs& args) {
         return 1;
     }
 
-    // Plain one-line-per-instruction dump for now. Making it line up in neat
-    // columns (and showing the raw bytes) is the next step's job.
-    std::cout << func << ":\n";
+    // The address is a fixed 16 digits, but the byte column and the mnemonic both
+    // vary in width from one function to the next, so measure them first and pad
+    // every row to the widest one. Same trick the symbols listing uses. Operands
+    // go last so they don't need padding.
+    std::vector<std::string> byte_cols;
+    byte_cols.reserve(insns.size());
+    std::size_t byte_w = 0;
+    std::size_t mnem_w = 0;
     for (const Instruction& insn : insns) {
-        std::cout << format_addr(insn.address) << ": " << insn.mnemonic;
+        byte_cols.push_back(format_bytes(insn.bytes));
+        byte_w = std::max(byte_w, byte_cols.back().size());
+        mnem_w = std::max(mnem_w, insn.mnemonic.size());
+    }
+
+    std::cout << func << ":\n";
+    for (std::size_t i = 0; i < insns.size(); ++i) {
+        const Instruction& insn = insns[i];
+        std::cout << format_addr(insn.address) << ":  " << std::left
+                  << std::setw(static_cast<int>(byte_w)) << byte_cols[i] << "  "
+                  << std::setw(static_cast<int>(mnem_w)) << insn.mnemonic;
         if (!insn.op_str.empty()) {
-            std::cout << " " << insn.op_str;
+            std::cout << "  " << insn.op_str;
         }
         std::cout << "\n";
     }
