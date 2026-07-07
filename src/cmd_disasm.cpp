@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include <unistd.h>
+
 #include "minidec/disasm.h"
 #include "minidec/loader.h"
 
@@ -55,6 +57,23 @@ const Section* find_text_section(const Binary& bin) {
         }
     }
     return nullptr;
+}
+
+// ANSI color for a control-flow instruction, or an empty string for the plain
+// ones. calls, jumps and returns each get their own color so they pop out when
+// you're scanning a listing. Returns a std::string so the caller can just check
+// .empty() and not worry about whether to print a reset afterwards.
+std::string flow_color(const Instruction& insn) {
+    if (insn.is_call) {
+        return "\033[32m";  // green
+    }
+    if (insn.is_ret) {
+        return "\033[31m";  // red
+    }
+    if (insn.is_jump) {
+        return "\033[33m";  // yellow
+    }
+    return "";
 }
 
 }  // namespace
@@ -142,12 +161,29 @@ int cmd_disasm(const ParsedArgs& args) {
         mnem_w = std::max(mnem_w, insn.mnemonic.size());
     }
 
+    // Color is on by default but we skip it when --no-color is passed or when
+    // stdout isn't a terminal (piped to a file or another program), otherwise the
+    // escape codes end up as junk in the redirected output.
+    bool use_color = !args.has_option("no-color") && isatty(STDOUT_FILENO);
+
     std::cout << func << ":\n";
     for (std::size_t i = 0; i < insns.size(); ++i) {
         const Instruction& insn = insns[i];
         std::cout << format_addr(insn.address) << ":  " << std::left
-                  << std::setw(static_cast<int>(byte_w)) << byte_cols[i] << "  "
-                  << std::setw(static_cast<int>(mnem_w)) << insn.mnemonic;
+                  << std::setw(static_cast<int>(byte_w)) << byte_cols[i] << "  ";
+
+        // Can't hand the colored mnemonic to std::setw: it counts the escape
+        // characters too and the padding comes out wrong. So print the color,
+        // the mnemonic, the reset, then pad by hand to the real text width.
+        std::string color = use_color ? flow_color(insn) : "";
+        std::cout << color << insn.mnemonic;
+        if (!color.empty()) {
+            std::cout << "\033[0m";
+        }
+        if (insn.mnemonic.size() < mnem_w) {
+            std::cout << std::string(mnem_w - insn.mnemonic.size(), ' ');
+        }
+
         if (!insn.op_str.empty()) {
             std::cout << "  " << insn.op_str;
         }
