@@ -8,6 +8,15 @@
 
 namespace minidec {
 
+// Which assembly dialect capstone should print the operands in. Intel is what
+// we default to (register first, no % or $ sigils) since it's what most people
+// reading x86-64 today expect; att is the older GAS style. Kept as our own enum
+// so the header doesn't have to include capstone just to name these.
+enum class Syntax {
+    intel,
+    att,
+};
+
 // One decoded instruction. This is our own little struct so the rest of the
 // program never has to touch capstone's cs_insn directly. The fields are the
 // bits we actually use later: where it lives, how long it is, the raw bytes,
@@ -42,7 +51,8 @@ struct Instruction {
 // reuse it across functions rather than opening a fresh one per call.
 class Disassembler {
 public:
-    Disassembler();
+    // Defaults to Intel syntax; pass Syntax::att to get the GAS-style output.
+    explicit Disassembler(Syntax syntax = Syntax::intel);
     ~Disassembler();
 
     // Capstone state isn't safe to copy, and copying would double-free the

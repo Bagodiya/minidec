@@ -6,7 +6,7 @@
 
 namespace minidec {
 
-Disassembler::Disassembler() {
+Disassembler::Disassembler(Syntax syntax) {
     csh handle = 0;
     // x86-64 only for now. cs_open returns CS_ERR_OK and fills in the handle on
     // success; on failure we just leave opened_ false and let callers notice via
@@ -16,6 +16,11 @@ Disassembler::Disassembler() {
         // membership (call, jump, ret, ...). Without this cs_insn_group has
         // nothing to read and every instruction looks like a plain one.
         cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+        // Pick the operand dialect. Capstone already prints Intel by default, so
+        // we only really need to flip it for att, but setting both explicitly
+        // keeps the mapping obvious.
+        cs_option(handle, CS_OPT_SYNTAX,
+                  syntax == Syntax::att ? CS_OPT_SYNTAX_ATT : CS_OPT_SYNTAX_INTEL);
         handle_ = static_cast<std::size_t>(handle);
         opened_ = true;
     }

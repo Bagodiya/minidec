@@ -143,6 +143,22 @@ int cmd_disasm(const ParsedArgs& args) {
         return 1;
     }
 
+    // Work out the syntax before we touch the binary so a typo fails fast. No
+    // --syntax means Intel; anything other than the two we know about is a user
+    // mistake worth pointing out rather than silently ignoring.
+    Syntax syntax = Syntax::intel;
+    if (args.has_option("syntax")) {
+        std::string choice = args.option("syntax");
+        if (choice == "att") {
+            syntax = Syntax::att;
+        } else if (choice == "intel") {
+            syntax = Syntax::intel;
+        } else {
+            std::cerr << "disasm: unknown --syntax '" << choice << "' (use att or intel)\n";
+            return 1;
+        }
+    }
+
     const Section* sec = find_text_section(*bin);
     if (!sec) {
         std::cerr << "disasm: no text section to read code from\n";
@@ -165,7 +181,7 @@ int cmd_disasm(const ParsedArgs& args) {
         return 1;
     }
 
-    Disassembler dis;
+    Disassembler dis(syntax);
     if (!dis.is_open()) {
         std::cerr << "disasm: couldn't start the disassembler\n";
         return 1;
