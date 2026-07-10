@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <optional>
@@ -72,6 +73,36 @@ std::string flow_color(const Instruction& insn) {
     }
     if (insn.is_jump) {
         return "\033[33m";  // yellow
+    }
+    return "";
+}
+
+// For a direct call/jmp, capstone hands us the target as a plain address in the
+// operand string (e.g. "0x1140"). Try to match that address to a symbol so we
+// can print its name next to the operand, the way objdump does. Returns the
+// name, or "" when this isn't a direct branch or nothing in the table sits on
+// that address.
+std::string resolve_target(const Binary& bin, const Instruction& insn) {
+    // Only direct branches carry an address we can resolve. Indirect ones (call
+    // rax, jmp [rip+..]) have a register or memory operand instead, so skip them.
+    if (!insn.is_relative || !(insn.is_call || insn.is_jump)) {
+        return "";
+    }
+
+    // strtoull instead of stoull so a weird operand can't throw at us. If it
+    // doesn't consume the whole string it wasn't a bare address, so don't trust
+    // the result.
+    const char* start = insn.op_str.c_str();
+    char* stop = nullptr;
+    std::uint64_t target = std::strtoull(start, &stop, 0);
+    if (stop == start || *stop != '\0') {
+        return "";
+    }
+
+    for (const Symbol& sym : bin.symbols) {
+        if (sym.address == target) {
+            return sym.name;
+        }
     }
     return "";
 }
@@ -186,6 +217,13 @@ int cmd_disasm(const ParsedArgs& args) {
 
         if (!insn.op_str.empty()) {
             std::cout << "  " << insn.op_str;
+
+            // Tack on the symbol name for a direct call/jmp so you can read
+            // "call 0x1140 <puts>" instead of chasing the bare address.
+            std::string target = resolve_target(*bin, insn);
+            if (!target.empty()) {
+                std::cout << " <" << target << ">";
+            }
         }
         std::cout << "\n";
     }
