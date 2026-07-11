@@ -11,6 +11,7 @@ add_executable(minidec_tests
     test_smoke.cpp
     test_cli.cpp
     test_binary.cpp
+    test_disasm.cpp
     ${CMAKE_SOURCE_DIR}/src/cli.cpp
     ${CMAKE_SOURCE_DIR}/src/cmd_symbols.cpp
     ${CMAKE_SOURCE_DIR}/src/cmd_disasm.cpp
