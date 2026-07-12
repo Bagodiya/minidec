@@ -66,9 +66,10 @@ public:
     // up (out of memory, unsupported build) and disassemble() will return empty.
     bool is_open() const { return opened_; }
 
-    // Decode a run of bytes starting at the given virtual address. Stops at the
-    // first byte capstone can't make sense of and returns whatever it decoded up
-    // to that point; handling the leftover junk is a later step's problem.
+    // Decode a run of bytes starting at the given virtual address. Bytes capstone
+    // can't decode (data mixed into the code, padding, jump tables) come back as
+    // single-byte ".byte 0xNN" instructions so the listing still covers the whole
+    // range instead of stopping at the first one it doesn't like.
     std::vector<Instruction> disassemble(const std::uint8_t* code, std::size_t size,
                                          std::uint64_t address) const;
 

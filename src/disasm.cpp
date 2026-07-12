@@ -1,5 +1,6 @@
 #include "minidec/disasm.h"
 
+#include <cstdio>
 #include <utility>
 
 #include <capstone/capstone.h>
@@ -63,38 +64,66 @@ std::vector<Instruction> Disassembler::disassemble(const std::uint8_t* code, std
     }
 
     csh handle = static_cast<csh>(handle_);
-    cs_insn* insn = nullptr;
 
-    // Passing 0 as the count tells capstone to decode until it runs out of bytes
-    // or hits something it can't decode. It allocates the insn array itself and
-    // hands back how many it filled; we hand that block back with cs_free.
-    std::size_t count = cs_disasm(handle, code, size, address, 0, &insn);
-    out.reserve(count);
-
-    for (std::size_t i = 0; i < count; ++i) {
-        const cs_insn& in = insn[i];
-        Instruction decoded;
-        decoded.address = in.address;
-        decoded.size = in.size;
-        decoded.bytes.assign(in.bytes, in.bytes + in.size);
-        decoded.mnemonic = in.mnemonic;
-        decoded.op_str = in.op_str;
-
-        // cs_insn_group only works when detail is on, which we set in the ctor.
-        // CS_GRP_JUMP covers both jmp and the conditional jcc family, and
-        // CS_GRP_BRANCH_RELATIVE tells us the target is a relative offset baked
-        // into the encoding (i.e. a direct branch we can resolve to a symbol).
-        decoded.is_call = cs_insn_group(handle, &in, CS_GRP_CALL);
-        decoded.is_jump = cs_insn_group(handle, &in, CS_GRP_JUMP);
-        decoded.is_ret = cs_insn_group(handle, &in, CS_GRP_RET);
-        decoded.is_relative = cs_insn_group(handle, &in, CS_GRP_BRANCH_RELATIVE);
-
-        out.push_back(std::move(decoded));
+    // cs_disasm_iter decodes one instruction at a time out of a buffer we own,
+    // instead of cs_disasm which stops dead at the first byte it can't read. We
+    // go one at a time so that when it does choke we can drop a placeholder for
+    // the bad byte and keep walking, rather than losing the rest of the function.
+    cs_insn* insn = cs_malloc(handle);
+    if (insn == nullptr) {
+        return out;
     }
 
-    if (insn != nullptr) {
-        cs_free(insn, count);
+    const std::uint8_t* ptr = code;
+    std::size_t left = size;
+    std::uint64_t addr = address;
+
+    while (left > 0) {
+        // On success iter advances ptr/left/addr past the instruction for us, so
+        // the next loop pass picks up right where this one ended.
+        if (cs_disasm_iter(handle, &ptr, &left, &addr, insn)) {
+            Instruction decoded;
+            decoded.address = insn->address;
+            decoded.size = insn->size;
+            decoded.bytes.assign(insn->bytes, insn->bytes + insn->size);
+            decoded.mnemonic = insn->mnemonic;
+            decoded.op_str = insn->op_str;
+
+            // cs_insn_group only works when detail is on, which we set in the
+            // ctor. CS_GRP_JUMP covers both jmp and the conditional jcc family,
+            // and CS_GRP_BRANCH_RELATIVE tells us the target is a relative offset
+            // baked into the encoding (i.e. a direct branch we can resolve).
+            decoded.is_call = cs_insn_group(handle, insn, CS_GRP_CALL);
+            decoded.is_jump = cs_insn_group(handle, insn, CS_GRP_JUMP);
+            decoded.is_ret = cs_insn_group(handle, insn, CS_GRP_RET);
+            decoded.is_relative = cs_insn_group(handle, insn, CS_GRP_BRANCH_RELATIVE);
+
+            out.push_back(std::move(decoded));
+        } else {
+            // capstone couldn't make an instruction out of the byte at ptr. This
+            // is normal: jump tables, string literals and alignment padding all
+            // end up sitting in the middle of .text. Emit the single byte as a
+            // ".byte 0xNN" line the way objdump does, then step over it by hand
+            // (iter didn't move ptr since it failed) and try the next one.
+            Instruction raw;
+            raw.address = addr;
+            raw.size = 1;
+            raw.bytes.assign(ptr, ptr + 1);
+            raw.mnemonic = ".byte";
+
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "0x%02x", *ptr);
+            raw.op_str = buf;
+
+            out.push_back(std::move(raw));
+
+            ptr += 1;
+            addr += 1;
+            left -= 1;
+        }
     }
+
+    cs_free(insn, 1);
     return out;
 }
 

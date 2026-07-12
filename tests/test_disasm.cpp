@@ -110,6 +110,35 @@ TEST_CASE("a short jump is a relative jump", "[disasm]") {
     CHECK(insns[0].op_str == "0x2000");
 }
 
+TEST_CASE("a byte capstone can't decode comes back as a .byte placeholder", "[disasm]") {
+    minidec::Disassembler dis;
+    REQUIRE(dis.is_open());
+
+    // 0x06 is "push es", which doesn't exist in 64-bit mode, so capstone refuses
+    // it. Sandwich it between a ret and a nop so we can check we don't drop the
+    // real instructions on either side of the junk byte.
+    // ret     c3
+    // (bad)   06
+    // nop     90
+    std::vector<std::uint8_t> code = {0xc3, 0x06, 0x90};
+
+    auto insns = dis.disassemble(code, 0x1000);
+    REQUIRE(insns.size() == 3);
+
+    CHECK(insns[0].mnemonic == "ret");
+    CHECK(insns[0].address == 0x1000);
+
+    CHECK(insns[1].mnemonic == ".byte");
+    CHECK(insns[1].op_str == "0x06");
+    CHECK(insns[1].address == 0x1001);
+    CHECK(insns[1].size == 1);
+    CHECK(insns[1].bytes == std::vector<std::uint8_t>{0x06});
+    CHECK_FALSE(insns[1].is_branch());
+
+    CHECK(insns[2].mnemonic == "nop");
+    CHECK(insns[2].address == 0x1002);
+}
+
 TEST_CASE("nothing to decode gives back an empty list", "[disasm]") {
     minidec::Disassembler dis;
 
