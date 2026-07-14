@@ -62,6 +62,19 @@ struct CFG {
     }
 };
 
+// Work out which instructions start a basic block. A leader is any instruction
+// you might land on out of the ordinary top-to-bottom flow, and there are three
+// ways that happens: the function's first instruction, the target an in-range
+// jump points at, and whatever comes right after something that ends a block
+// (a jump or a ret). The next step groups the instructions up by cutting at
+// these addresses, so this is really just finding the cut points.
+//
+// The returned addresses are sorted and de-duplicated, and only ever name a real
+// instruction in the list -- jump targets that land outside the function (or that
+// we can't read off a direct operand) are left out since they don't split any
+// block we're building here.
+std::vector<std::uint64_t> find_block_leaders(const std::vector<Instruction>& instructions);
+
 }  // namespace minidec
 
 #endif  // MINIDEC_CFG_H

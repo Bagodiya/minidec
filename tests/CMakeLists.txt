@@ -18,6 +18,7 @@ add_executable(minidec_tests
     ${CMAKE_SOURCE_DIR}/src/disasm.cpp
     ${CMAKE_SOURCE_DIR}/src/elf_loader.cpp
     ${CMAKE_SOURCE_DIR}/src/macho_loader.cpp
+    ${CMAKE_SOURCE_DIR}/src/cfg.cpp
 )
 target_link_libraries(minidec_tests PRIVATE Catch2::Catch2WithMain LIEF::LIEF ${CAPSTONE_LIBRARIES})
 target_include_directories(minidec_tests PRIVATE ${CMAKE_SOURCE_DIR}/include ${CAPSTONE_INCLUDE_DIRS})
