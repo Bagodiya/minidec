@@ -86,4 +86,41 @@ std::vector<std::uint64_t> find_block_leaders(const std::vector<Instruction>& in
     return leaders;
 }
 
+std::vector<BasicBlock> group_into_blocks(const std::vector<Instruction>& instructions) {
+    std::vector<BasicBlock> blocks;
+    if (instructions.empty()) {
+        return blocks;
+    }
+
+    // find_block_leaders already gives us every address that has to start a block,
+    // including the instruction right after each jump/ret, so a leader is the only
+    // place we ever need to make a cut. Drop them into a set for quick lookups.
+    std::vector<std::uint64_t> leaders = find_block_leaders(instructions);
+    std::unordered_set<std::uint64_t> is_leader(leaders.begin(), leaders.end());
+
+    BasicBlock current;
+    for (const Instruction& insn : instructions) {
+        // Hitting a leader means the previous block is done. Push what we've got
+        // and start collecting a new one from here. The very first instruction is
+        // a leader too, but current is still empty then so there's nothing to push.
+        if (is_leader.count(insn.address) && !current.empty()) {
+            blocks.push_back(std::move(current));
+            current = BasicBlock{};
+        }
+
+        if (current.empty()) {
+            current.start = insn.address;
+        }
+        current.instructions.push_back(insn);
+        current.end = insn.address + insn.size;
+    }
+
+    // Whatever we were building when the instructions ran out is the last block.
+    if (!current.empty()) {
+        blocks.push_back(std::move(current));
+    }
+
+    return blocks;
+}
+
 }  // namespace minidec

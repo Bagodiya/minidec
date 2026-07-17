@@ -75,6 +75,16 @@ struct CFG {
 // block we're building here.
 std::vector<std::uint64_t> find_block_leaders(const std::vector<Instruction>& instructions);
 
+// Cut the instruction list into basic blocks at the leader addresses. Each block
+// runs from one leader up to (but not including) the next one, so every leader
+// starts exactly one block and the instructions in between all belong to it. The
+// blocks come back in the same order the instructions were in, which is sorted by
+// address, and each one has its start, end, and instruction list filled in.
+//
+// Successors are left empty on purpose -- wiring the edges between blocks is the
+// next step. This one only worries about where each block begins and ends.
+std::vector<BasicBlock> group_into_blocks(const std::vector<Instruction>& instructions);
+
 }  // namespace minidec
 
 #endif  // MINIDEC_CFG_H
