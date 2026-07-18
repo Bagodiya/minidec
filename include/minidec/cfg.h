@@ -85,6 +85,21 @@ std::vector<std::uint64_t> find_block_leaders(const std::vector<Instruction>& in
 // next step. This one only worries about where each block begins and ends.
 std::vector<BasicBlock> group_into_blocks(const std::vector<Instruction>& instructions);
 
+// Fill in each block's successor list now that we know where every block starts
+// and ends. group_into_blocks lays the blocks out in order but leaves them with no
+// edges, so here we look at what instruction each block ends on to decide where
+// control goes next:
+//
+//   - ends on a ret        -> nowhere, the function returns (no successors)
+//   - ends on a plain jmp  -> just the block it jumps to
+//   - ends on a jcc        -> two of them: the branch target and the fall-through
+//   - anything else         -> falls straight into the block that comes after it
+//
+// A jump whose target we can't pin down (an indirect "jmp rax", or a target that
+// lands outside the function) gets no edge for that side, since there's no block
+// of ours to point it at. The blocks are edited in place.
+void connect_blocks(std::vector<BasicBlock>& blocks);
+
 }  // namespace minidec
 
 #endif  // MINIDEC_CFG_H

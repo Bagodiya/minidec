@@ -123,4 +123,58 @@ std::vector<BasicBlock> group_into_blocks(const std::vector<Instruction>& instru
     return blocks;
 }
 
+void connect_blocks(std::vector<BasicBlock>& blocks) {
+    // Every edge we add has to name the start of a real block, so collect the set
+    // of block-start addresses up front and check each candidate target against it.
+    // A jump that lands anywhere else (outside the function, mid-instruction) just
+    // doesn't get an edge -- we've got nothing of ours to point it at.
+    std::unordered_set<std::uint64_t> block_starts;
+    block_starts.reserve(blocks.size());
+    for (const BasicBlock& block : blocks) {
+        block_starts.insert(block.start);
+    }
+
+    // Because the blocks are contiguous, a block's end address is exactly where the
+    // next block begins, so block.end is the fall-through target whenever there is
+    // one. The last block of the function ends past the final instruction and no
+    // block starts there, which is how "falls off the end" comes out with no edge.
+    for (BasicBlock& block : blocks) {
+        if (block.empty()) {
+            continue;
+        }
+
+        const Instruction& term = block.terminator();
+
+        // A ret hands control back to the caller, not to another block here.
+        if (term.is_ret) {
+            continue;
+        }
+
+        if (term.is_jump) {
+            // "jmp" is the only unconditional jump; everything else that's a jump
+            // is a jcc, which also carries on to the next block when the condition
+            // comes out false, so it picks up the fall-through edge as well.
+            bool conditional = term.mnemonic != "jmp";
+
+            if (auto target = jump_target(term)) {
+                if (block_starts.count(*target)) {
+                    block.successors.push_back(*target);
+                }
+            }
+
+            if (conditional && block_starts.count(block.end)) {
+                block.successors.push_back(block.end);
+            }
+            continue;
+        }
+
+        // No branch at the tail at all: this block was cut short only because the
+        // instruction after it is a leader (something jumps there). Control runs
+        // straight on into whatever block starts where this one ends.
+        if (block_starts.count(block.end)) {
+            block.successors.push_back(block.end);
+        }
+    }
+}
+
 }  // namespace minidec
