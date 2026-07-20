@@ -15,6 +15,12 @@ int cmd_symbols(const ParsedArgs& args);
 // process exit code (0 on success).
 int cmd_disasm(const ParsedArgs& args);
 
+// Entry point for `minidec cfg <file> --func <name>`. Disassembles the named
+// function, splits it into basic blocks, and prints each block with its
+// instructions and the blocks control can reach from it. Returns the process
+// exit code (0 on success).
+int cmd_cfg(const ParsedArgs& args);
+
 }  // namespace minidec
 
 #endif  // MINIDEC_COMMANDS_H

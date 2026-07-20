@@ -79,6 +79,7 @@ add_executable(minidec
     src/cli.cpp
     src/cmd_symbols.cpp
     src/cmd_disasm.cpp
+    src/cmd_cfg.cpp
     src/elf_loader.cpp
     src/macho_loader.cpp
     src/disasm.cpp

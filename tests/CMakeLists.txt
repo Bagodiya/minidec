@@ -15,6 +15,7 @@ add_executable(minidec_tests
     ${CMAKE_SOURCE_DIR}/src/cli.cpp
     ${CMAKE_SOURCE_DIR}/src/cmd_symbols.cpp
     ${CMAKE_SOURCE_DIR}/src/cmd_disasm.cpp
+    ${CMAKE_SOURCE_DIR}/src/cmd_cfg.cpp
     ${CMAKE_SOURCE_DIR}/src/disasm.cpp
     ${CMAKE_SOURCE_DIR}/src/elf_loader.cpp
     ${CMAKE_SOURCE_DIR}/src/macho_loader.cpp
