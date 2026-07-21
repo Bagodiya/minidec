@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <iomanip>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -38,12 +37,141 @@ const Section* find_text_section(const Binary& bin) {
     return nullptr;
 }
 
+// One instruction as a single line of text, mnemonic padded out to `mnem_w` so
+// the operands line up under each other. Both output formats want the same line,
+// the text one prints it directly and the dot one packs it into a node label.
+std::string format_insn(const Instruction& insn, std::size_t mnem_w) {
+    std::string line = insn.mnemonic;
+    if (!insn.op_str.empty()) {
+        if (line.size() < mnem_w) {
+            line += std::string(mnem_w - line.size(), ' ');
+        }
+        line += "  ";
+        line += insn.op_str;
+    }
+    return line;
+}
+
+// Graphviz reads a quoted label until the closing quote, so a backslash or a
+// quote inside one has to be escaped or the file won't parse. Operand text is
+// nearly always plain, but AT&T-style operands and the .byte placeholders we
+// emit for undecodable bytes can carry either, so don't assume.
+std::string escape_label(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    for (char c : text) {
+        if (c == '"' || c == '\\') {
+            out += '\\';
+        }
+        out += c;
+    }
+    return out;
+}
+
+// The textual listing: every block with its instructions and where it goes next.
+void emit_text(const CFG& cfg, const std::string& func,
+               const std::unordered_map<std::uint64_t, std::size_t>& block_index,
+               std::size_t mnem_w) {
+    std::cout << func << ": " << cfg.size() << (cfg.size() == 1 ? " block\n" : " blocks\n");
+
+    for (std::size_t i = 0; i < cfg.blocks.size(); ++i) {
+        const BasicBlock& block = cfg.blocks[i];
+
+        std::cout << "\nb" << i << " [" << format_addr(block.start) << " - "
+                  << format_addr(block.end) << ")";
+        if (block.start == cfg.entry) {
+            std::cout << "  entry";
+        }
+        std::cout << "\n";
+
+        for (const Instruction& insn : block.instructions) {
+            std::cout << "  " << format_addr(insn.address) << ":  " << format_insn(insn, mnem_w)
+                      << "\n";
+        }
+
+        // No successors means the block ends the function, either on a ret or on a
+        // branch we couldn't follow. Say so rather than printing an empty list.
+        if (block.successors.empty()) {
+            std::cout << "  -> (none)\n";
+            continue;
+        }
+
+        std::cout << "  ->";
+        for (std::uint64_t succ : block.successors) {
+            auto it = block_index.find(succ);
+            if (it == block_index.end()) {
+                // connect_blocks only ever points at a block start, so this
+                // shouldn't happen -- print the address rather than pretend.
+                std::cout << " " << format_addr(succ);
+            } else {
+                std::cout << " b" << it->second;
+            }
+        }
+        std::cout << "\n";
+    }
+}
+
+// The same graph as a Graphviz file, so you can run it through
+// `dot -Tpng` and actually look at the shape of a function.
+//
+// Blocks come out as left-aligned boxes in a fixed-width font: "\l" is graphviz's
+// line break that also left-aligns the line it ends, which a plain "\n" doesn't
+// do, and without it every instruction ends up centered and unreadable.
+void emit_dot(const CFG& cfg, const std::string& func,
+              const std::unordered_map<std::uint64_t, std::size_t>& block_index,
+              std::size_t mnem_w) {
+    std::cout << "digraph \"" << escape_label(func) << "\" {\n";
+    std::cout << "  graph [label=\"" << escape_label(func) << "\", labelloc=t];\n";
+    std::cout << "  node [shape=box, fontname=\"monospace\"];\n\n";
+
+    for (std::size_t i = 0; i < cfg.blocks.size(); ++i) {
+        const BasicBlock& block = cfg.blocks[i];
+
+        std::cout << "  b" << i << " [label=\"b" << i << " (" << format_addr(block.start) << ")\\l";
+        for (const Instruction& insn : block.instructions) {
+            std::cout << escape_label(format_insn(insn, mnem_w)) << "\\l";
+        }
+        std::cout << "\"";
+
+        // The entry block gets a heavier border so it's obvious where to start
+        // reading; dot lays blocks out top-down but that ordering isn't a promise.
+        if (block.start == cfg.entry) {
+            std::cout << ", penwidth=2";
+        }
+        std::cout << "];\n";
+    }
+
+    std::cout << "\n";
+    for (std::size_t i = 0; i < cfg.blocks.size(); ++i) {
+        const BasicBlock& block = cfg.blocks[i];
+
+        // connect_blocks pushes the branch target first and the fall-through
+        // second, so a block with two edges is a conditional and we can label the
+        // two sides without having to look at the terminator again.
+        bool conditional = block.successors.size() == 2;
+
+        for (std::size_t s = 0; s < block.successors.size(); ++s) {
+            auto it = block_index.find(block.successors[s]);
+            if (it == block_index.end()) {
+                continue;
+            }
+            std::cout << "  b" << i << " -> b" << it->second;
+            if (conditional) {
+                std::cout << " [label=\"" << (s == 0 ? "taken" : "fall") << "\"]";
+            }
+            std::cout << ";\n";
+        }
+    }
+
+    std::cout << "}\n";
+}
+
 }  // namespace
 
 int cmd_cfg(const ParsedArgs& args) {
     if (args.positionals.empty()) {
         std::cerr << "cfg: no input file given\n";
-        std::cerr << "usage: minidec cfg <file> --func <name>\n";
+        std::cerr << "usage: minidec cfg <file> --func <name> [--format text|dot]\n";
         return 1;
     }
 
@@ -51,6 +179,19 @@ int cmd_cfg(const ParsedArgs& args) {
     if (func.empty()) {
         std::cerr << "cfg: no function given (pass --func <name>)\n";
         return 1;
+    }
+
+    // Check the format before loading anything so a typo fails straight away
+    // instead of after we've parsed a binary. No --format means the text listing.
+    bool as_dot = false;
+    if (args.has_option("format")) {
+        std::string choice = args.option("format");
+        if (choice == "dot") {
+            as_dot = true;
+        } else if (choice != "text") {
+            std::cerr << "cfg: unknown --format '" << choice << "' (use text or dot)\n";
+            return 1;
+        }
     }
 
     const std::string& path = args.positionals.front();
@@ -131,46 +272,10 @@ int cmd_cfg(const ParsedArgs& args) {
         mnem_w = std::max(mnem_w, insn.mnemonic.size());
     }
 
-    std::cout << func << ": " << cfg.size() << (cfg.size() == 1 ? " block\n" : " blocks\n");
-
-    for (std::size_t i = 0; i < cfg.blocks.size(); ++i) {
-        const BasicBlock& block = cfg.blocks[i];
-
-        std::cout << "\nb" << i << " [" << format_addr(block.start) << " - "
-                  << format_addr(block.end) << ")";
-        if (block.start == cfg.entry) {
-            std::cout << "  entry";
-        }
-        std::cout << "\n";
-
-        for (const Instruction& insn : block.instructions) {
-            std::cout << "  " << format_addr(insn.address) << ":  " << std::left
-                      << std::setw(static_cast<int>(mnem_w)) << insn.mnemonic;
-            if (!insn.op_str.empty()) {
-                std::cout << "  " << insn.op_str;
-            }
-            std::cout << "\n";
-        }
-
-        // No successors means the block ends the function, either on a ret or on a
-        // branch we couldn't follow. Say so rather than printing an empty list.
-        if (block.successors.empty()) {
-            std::cout << "  -> (none)\n";
-            continue;
-        }
-
-        std::cout << "  ->";
-        for (std::uint64_t succ : block.successors) {
-            auto it = block_index.find(succ);
-            if (it == block_index.end()) {
-                // connect_blocks only ever points at a block start, so this
-                // shouldn't happen -- print the address rather than pretend.
-                std::cout << " " << format_addr(succ);
-            } else {
-                std::cout << " b" << it->second;
-            }
-        }
-        std::cout << "\n";
+    if (as_dot) {
+        emit_dot(cfg, func, block_index, mnem_w);
+    } else {
+        emit_text(cfg, func, block_index, mnem_w);
     }
 
     return 0;
