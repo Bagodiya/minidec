@@ -3,6 +3,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "minidec/disasm.h"
@@ -99,6 +101,29 @@ std::vector<BasicBlock> group_into_blocks(const std::vector<Instruction>& instru
 // lands outside the function) gets no edge for that side, since there's no block
 // of ours to point it at. The blocks are edited in place.
 void connect_blocks(std::vector<BasicBlock>& blocks);
+
+// Which blocks dominate which, keyed by block start address. The set for a block
+// holds the start addresses of every block that dominates it, itself included.
+using DominatorSets = std::unordered_map<std::uint64_t, std::unordered_set<std::uint64_t>>;
+
+// Work out the dominators of every block. Block A dominates block B when there is
+// no way to reach B from the entry without passing through A first, so the entry
+// dominates everything and every block trivially dominates itself. Later steps
+// need this to spot loops (a back edge is one that jumps to a block dominating it)
+// and to build SSA, which is why it comes before any of that.
+//
+// This is the textbook iterative version: start by assuming every block is
+// dominated by all of them, then keep applying
+//
+//     dom(b) = {b} + intersection of dom(p) for every predecessor p of b
+//
+// until nothing changes. The sets only ever shrink, so it always settles.
+//
+// Blocks that can't be reached from the entry (nothing jumps to them and they
+// aren't the entry) come back dominated by every block, which is what falls out of
+// intersecting an empty list of predecessors. That's the usual convention and it
+// keeps them from dragging real answers down.
+DominatorSets compute_dominators(const CFG& cfg);
 
 }  // namespace minidec
 

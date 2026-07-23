@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <iterator>
 #include <optional>
 #include <unordered_set>
 
@@ -175,6 +176,70 @@ void connect_blocks(std::vector<BasicBlock>& blocks) {
             block.successors.push_back(block.end);
         }
     }
+}
+
+DominatorSets compute_dominators(const CFG& cfg) {
+    DominatorSets dominators;
+    if (cfg.empty()) {
+        return dominators;
+    }
+
+    // The edges we have run forwards (each block lists where it goes), but the
+    // dominator rule needs them the other way round, so flip them once up front.
+    // Successor addresses always name a block start, so nothing here can miss.
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> predecessors;
+    std::unordered_set<std::uint64_t> everything;
+    everything.reserve(cfg.size());
+    for (const BasicBlock& block : cfg.blocks) {
+        everything.insert(block.start);
+    }
+    for (const BasicBlock& block : cfg.blocks) {
+        for (std::uint64_t succ : block.successors) {
+            predecessors[succ].push_back(block.start);
+        }
+    }
+
+    // Start pessimistic: every block is dominated by every block. The entry is the
+    // exception -- nothing comes before it, so only it dominates it, and that's the
+    // fixed point the rest of the sets get whittled down from.
+    for (const BasicBlock& block : cfg.blocks) {
+        dominators[block.start] = everything;
+    }
+    dominators[cfg.entry] = {cfg.entry};
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+
+        for (const BasicBlock& block : cfg.blocks) {
+            if (block.start == cfg.entry) {
+                continue;
+            }
+
+            auto preds = predecessors.find(block.start);
+            if (preds == predecessors.end()) {
+                continue;  // unreachable, leave it dominated by everything
+            }
+
+            // Intersect the predecessors' sets by starting from the first one and
+            // dropping anything the rest don't also have.
+            std::unordered_set<std::uint64_t> updated = dominators[preds->second.front()];
+            for (std::size_t i = 1; i < preds->second.size(); ++i) {
+                const std::unordered_set<std::uint64_t>& other = dominators[preds->second[i]];
+                for (auto it = updated.begin(); it != updated.end();) {
+                    it = other.count(*it) ? std::next(it) : updated.erase(it);
+                }
+            }
+            updated.insert(block.start);
+
+            if (updated != dominators[block.start]) {
+                dominators[block.start] = std::move(updated);
+                changed = true;
+            }
+        }
+    }
+
+    return dominators;
 }
 
 }  // namespace minidec
