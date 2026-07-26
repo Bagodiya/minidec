@@ -38,6 +38,49 @@ std::optional<std::uint64_t> jump_target(const Instruction& insn) {
     return target;
 }
 
+// Flip the edges around. Blocks only record where they go, but both the dominator
+// pass and the loop-body walk need to ask the opposite question -- who comes into
+// this block -- so build the reverse map once and hand it out. Successor addresses
+// always name a block start, so the keys line up with real blocks.
+std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> build_predecessors(const CFG& cfg) {
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> predecessors;
+    for (const BasicBlock& block : cfg.blocks) {
+        for (std::uint64_t succ : block.successors) {
+            predecessors[succ].push_back(block.start);
+        }
+    }
+    return predecessors;
+}
+
+// Everything you can actually get to from the entry, found by walking edges
+// forwards. Dead blocks do turn up in real binaries -- padding between functions,
+// a tail the compiler proved unreachable -- and the dominator sets give them a
+// meaningless answer, so callers that care need to be able to filter them out.
+std::unordered_set<std::uint64_t> reachable_blocks(const CFG& cfg) {
+    std::unordered_set<std::uint64_t> seen;
+    if (cfg.empty() || cfg.block_at(cfg.entry) == nullptr) {
+        return seen;
+    }
+
+    std::vector<std::uint64_t> worklist{cfg.entry};
+    seen.insert(cfg.entry);
+    while (!worklist.empty()) {
+        std::uint64_t current = worklist.back();
+        worklist.pop_back();
+
+        const BasicBlock* block = cfg.block_at(current);
+        if (block == nullptr) {
+            continue;
+        }
+        for (std::uint64_t succ : block->successors) {
+            if (seen.insert(succ).second) {
+                worklist.push_back(succ);
+            }
+        }
+    }
+    return seen;
+}
+
 }  // namespace
 
 std::vector<std::uint64_t> find_block_leaders(const std::vector<Instruction>& instructions) {
@@ -184,19 +227,14 @@ DominatorSets compute_dominators(const CFG& cfg) {
         return dominators;
     }
 
-    // The edges we have run forwards (each block lists where it goes), but the
-    // dominator rule needs them the other way round, so flip them once up front.
-    // Successor addresses always name a block start, so nothing here can miss.
-    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> predecessors;
+    // The dominator rule reads the edges backwards, so get the reverse map first.
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> predecessors =
+        build_predecessors(cfg);
+
     std::unordered_set<std::uint64_t> everything;
     everything.reserve(cfg.size());
     for (const BasicBlock& block : cfg.blocks) {
         everything.insert(block.start);
-    }
-    for (const BasicBlock& block : cfg.blocks) {
-        for (std::uint64_t succ : block.successors) {
-            predecessors[succ].push_back(block.start);
-        }
     }
 
     // Start pessimistic: every block is dominated by every block. The entry is the
@@ -240,6 +278,76 @@ DominatorSets compute_dominators(const CFG& cfg) {
     }
 
     return dominators;
+}
+
+std::vector<NaturalLoop> find_natural_loops(const CFG& cfg, const DominatorSets& dominators) {
+    std::vector<NaturalLoop> loops;
+    if (cfg.empty()) {
+        return loops;
+    }
+
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> predecessors =
+        build_predecessors(cfg);
+    std::unordered_set<std::uint64_t> reachable = reachable_blocks(cfg);
+
+    // Blocks are already sorted by address, so going through them in order is what
+    // makes the loop list come out the same way every run.
+    for (const BasicBlock& block : cfg.blocks) {
+        if (!reachable.count(block.start)) {
+            continue;
+        }
+
+        auto doms = dominators.find(block.start);
+        if (doms == dominators.end()) {
+            continue;
+        }
+
+        for (std::uint64_t succ : block.successors) {
+            // The whole test: we're jumping to a block that dominates us. A block
+            // dominates itself, so a one-block loop (jmp to its own start) falls
+            // out of this too without needing a special case.
+            if (!doms->second.count(succ)) {
+                continue;
+            }
+
+            NaturalLoop loop;
+            loop.header = succ;
+            loop.latch = block.start;
+
+            // Seed the body with the header before anything else. The walk below
+            // only ever adds blocks it hasn't seen, so having the header in there
+            // already is what stops it from stepping over the top of the loop and
+            // dragging in the whole function above it.
+            loop.body.insert(loop.header);
+
+            std::vector<std::uint64_t> worklist;
+            if (loop.body.insert(loop.latch).second) {
+                worklist.push_back(loop.latch);
+            }
+
+            // Anything that reaches the latch without passing the header is inside
+            // the loop, so climb the predecessor edges from the latch and take
+            // everything the walk touches.
+            while (!worklist.empty()) {
+                std::uint64_t current = worklist.back();
+                worklist.pop_back();
+
+                auto preds = predecessors.find(current);
+                if (preds == predecessors.end()) {
+                    continue;
+                }
+                for (std::uint64_t pred : preds->second) {
+                    if (loop.body.insert(pred).second) {
+                        worklist.push_back(pred);
+                    }
+                }
+            }
+
+            loops.push_back(std::move(loop));
+        }
+    }
+
+    return loops;
 }
 
 }  // namespace minidec

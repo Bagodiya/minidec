@@ -125,6 +125,41 @@ using DominatorSets = std::unordered_map<std::uint64_t, std::unordered_set<std::
 // keeps them from dragging real answers down.
 DominatorSets compute_dominators(const CFG& cfg);
 
+// One loop in the graph, in the shape the classic "natural loop" definition gives
+// you. The header is the block you always come in through, the latch is the block
+// at the bottom that jumps back up to it, and the body is every block that sits
+// between the two, header and latch included.
+//
+// Nested loops come back as separate entries, and a header with two different
+// blocks jumping back to it comes back as two entries sharing that header. Merging
+// those into one loop each is a later problem; here we just report what the edges
+// say.
+struct NaturalLoop {
+    std::uint64_t header = 0;  // the block the back edge points at
+    std::uint64_t latch = 0;   // the block the back edge comes from
+    std::unordered_set<std::uint64_t> body;
+
+    bool contains(std::uint64_t address) const { return body.count(address) != 0; }
+    std::size_t size() const { return body.size(); }
+};
+
+// Find every natural loop in the function. The trick is that a loop in the source
+// shows up in the graph as a back edge: an edge B -> A where A already dominates B,
+// meaning the only way we got to B in the first place was through A, so jumping to
+// A from there runs the same stretch of code again. Dominators are what make that
+// checkable, which is why compute_dominators comes first and its result is passed
+// straight in rather than recomputed here.
+//
+// Once we have the back edge the body is everything that can reach B without
+// leaving through A, which we get by walking predecessors backwards from B and
+// refusing to go past A. Blocks that aren't reachable from the entry are skipped
+// entirely -- compute_dominators leaves them dominated by every block, so every
+// edge out of one would otherwise look like a back edge.
+//
+// Loops come out in address order of their latch block, so the same function
+// always gives the same list.
+std::vector<NaturalLoop> find_natural_loops(const CFG& cfg, const DominatorSets& dominators);
+
 }  // namespace minidec
 
 #endif  // MINIDEC_CFG_H
