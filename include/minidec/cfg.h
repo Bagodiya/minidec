@@ -160,6 +160,23 @@ struct NaturalLoop {
 // always gives the same list.
 std::vector<NaturalLoop> find_natural_loops(const CFG& cfg, const DominatorSets& dominators);
 
+// Walk the blocks in reverse postorder and hand back their start addresses in that
+// order. Reverse postorder is the useful one for the dataflow passes coming up: it
+// guarantees that a block shows up after every one of its predecessors except the
+// ones reaching it through a back edge, so a forward analysis gets to look at real
+// answers for its inputs on the first sweep instead of spinning a few extra rounds
+// on placeholders. Address order doesn't give you that -- the compiler is free to
+// lay a block out wherever it likes.
+//
+// It's a depth-first search that records each block once we're finished with it
+// (after all its successors), then flips the list around at the end. Successors are
+// taken in the order they're stored, so the same graph always gives the same list.
+//
+// Only blocks reachable from the entry come back, which is the point rather than an
+// oversight -- an unreachable block has no meaningful place in a forward walk, so
+// the caller can treat "not in this list" as "don't bother analysing it".
+std::vector<std::uint64_t> compute_reverse_postorder(const CFG& cfg);
+
 }  // namespace minidec
 
 #endif  // MINIDEC_CFG_H

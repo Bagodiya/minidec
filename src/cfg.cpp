@@ -350,4 +350,53 @@ std::vector<NaturalLoop> find_natural_loops(const CFG& cfg, const DominatorSets&
     return loops;
 }
 
+std::vector<std::uint64_t> compute_reverse_postorder(const CFG& cfg) {
+    std::vector<std::uint64_t> order;
+    if (cfg.empty() || cfg.block_at(cfg.entry) == nullptr) {
+        return order;
+    }
+
+    // The search is written out with an explicit stack instead of recursing. What
+    // makes that fiddly for a postorder is that we have to come back to a block
+    // after each successor finishes, so a frame remembers which successor we were
+    // up to and we only write the block down once that counter runs off the end.
+    struct Frame {
+        std::uint64_t block = 0;
+        std::size_t next_successor = 0;
+    };
+
+    std::unordered_set<std::uint64_t> visited;
+    std::vector<Frame> stack;
+
+    visited.insert(cfg.entry);
+    stack.push_back(Frame{cfg.entry, 0});
+
+    while (!stack.empty()) {
+        Frame& frame = stack.back();
+        const BasicBlock* block = cfg.block_at(frame.block);
+
+        if (block != nullptr && frame.next_successor < block->successors.size()) {
+            std::uint64_t succ = block->successors[frame.next_successor];
+            ++frame.next_successor;
+
+            // Mark on the way in, not on the way out. A loop means we'll meet the
+            // header again from inside the body, and without this the walk would
+            // just keep going round. Note the push invalidates frame, which is why
+            // we're done with it by here.
+            if (visited.insert(succ).second && cfg.block_at(succ) != nullptr) {
+                stack.push_back(Frame{succ, 0});
+            }
+            continue;
+        }
+
+        // Out of successors, so everything below this block is already recorded and
+        // it's this one's turn. That's the postorder; the reverse comes after.
+        order.push_back(frame.block);
+        stack.pop_back();
+    }
+
+    std::reverse(order.begin(), order.end());
+    return order;
+}
+
 }  // namespace minidec
