@@ -23,11 +23,12 @@ namespace minidec {
 // the operations, without having to build a whole function first.
 //
 // Only a small slice of x86 is handled so far -- moves between registers and
-// constants, and nop. Everything else becomes a single Opcode::unknown, which is
-// deliberate: an instruction we can't model yet still shows up in the right place
-// in the stream, so the passes downstream see a gap rather than a wrong answer,
-// and the function around it stays analysable. Arithmetic, memory, branches and
-// calls each get filled in over the steps after this one.
+// constants, nop, and the integer arithmetic that works register to register.
+// Everything else becomes a single Opcode::unknown, which is deliberate: an
+// instruction we can't model yet still shows up in the right place in the
+// stream, so the passes downstream see a gap rather than a wrong answer, and the
+// function around it stays analysable. Memory, branches and calls each get
+// filled in over the steps after this one.
 
 // How wide a machine register is, or nothing if the name isn't one we know.
 // Covers the 64/32/16/8-bit integer registers under their usual names plus the
@@ -58,6 +59,19 @@ public:
 private:
     // Hand out the next unused temporary at the given width.
     IrOperand new_temp(IrType type);
+
+    // One mnemonic each, appending to `out` and returning false without having
+    // touched it when the operands aren't a shape we can model. These are
+    // members rather than file-local helpers because they all invent
+    // temporaries, and the counter for those lives here.
+    bool lift_add_sub(const Instruction& insn, bool subtract, std::vector<IrInst>& out);
+    bool lift_imul(const Instruction& insn, std::vector<IrInst>& out);
+    bool lift_div(const Instruction& insn, bool is_signed, std::vector<IrInst>& out);
+
+    // The flag writes shared by add and sub, given the two operands and the
+    // temporary holding the result.
+    void emit_arith_flags(const IrOperand& lhs, const IrOperand& rhs, const IrOperand& result,
+                          bool subtract, std::uint64_t address, std::vector<IrInst>& out);
 
     unsigned next_temp_ = 0;
 };

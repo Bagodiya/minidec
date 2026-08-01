@@ -182,6 +182,42 @@ std::optional<IrOperand> parse_operand(std::string_view text, IrType width_hint)
     return std::nullopt;
 }
 
+// Build one operation in a single expression. The arithmetic below emits runs of
+// eight and nine operations at a time, and filling in five fields by hand each
+// time buried what the sequence was actually doing.
+IrInst make_inst(Opcode op, IrType type, IrOperand dst, std::vector<IrOperand> args,
+                 std::uint64_t address) {
+    IrInst inst;
+    inst.op = op;
+    inst.type = type;
+    inst.dst = std::move(dst);
+    inst.args = std::move(args);
+    inst.address = address;
+    return inst;
+}
+
+// The register pair div and idiv work on, which changes name with the width.
+// The 8-bit form is missing on purpose: it divides ax rather than a pair and
+// leaves the remainder in ah, so it doesn't fit the shape the others share and
+// isn't worth a special case for how rarely compilers emit it.
+struct DivisionRegisters {
+    const char* accumulator;  // holds the dividend going in, the quotient coming out
+    const char* remainder;
+};
+
+std::optional<DivisionRegisters> division_registers(IrType type) {
+    switch (type) {
+    case IrType::i16:
+        return DivisionRegisters{"ax", "dx"};
+    case IrType::i32:
+        return DivisionRegisters{"eax", "edx"};
+    case IrType::i64:
+        return DivisionRegisters{"rax", "rdx"};
+    default:
+        return std::nullopt;
+    }
+}
+
 // The placeholder for an instruction we can't model yet. It writes nothing and
 // reads nothing, which is a lie, but it's a lie in the right place: a pass that
 // walks the IR sees an operation it has to treat as opaque instead of quietly
@@ -249,6 +285,201 @@ IrOperand Lifter::new_temp(IrType type) {
     return make_temp(next_temp_++, type);
 }
 
+// x86 updates six flags after an add or a sub and we write four of them. zf and
+// sf fall straight out of the result; cf and of cost a few extra operations
+// each, but every conditional jump in step 43 reads one of the four, so they
+// have to be here and they have to be right.
+//
+// pf and af are the two left out. af only matters to the BCD instructions, which
+// nothing has emitted in decades, and pf is the parity of the low byte, which
+// would need a popcount the IR has no opcode for. Neither is left holding a
+// wrong answer -- they just keep whatever they had before the instruction, which
+// a later pass can at least see is stale.
+void Lifter::emit_arith_flags(const IrOperand& lhs, const IrOperand& rhs, const IrOperand& result,
+                              bool subtract, std::uint64_t address, std::vector<IrInst>& out) {
+    IrType width = result.type;
+    IrOperand zero = make_imm(0, width);
+
+    out.push_back(
+        make_inst(Opcode::cmp_eq, IrType::i1, make_reg("zf", IrType::i1), {result, zero}, address));
+    out.push_back(make_inst(Opcode::cmp_lt_s, IrType::i1, make_reg("sf", IrType::i1),
+                            {result, zero}, address));
+
+    // The carry out of the top bit. A sub carries when it had to borrow, which
+    // is exactly when the left side was the smaller of the two read as unsigned.
+    // An add carries when it wrapped round, and a wrapped sum always lands below
+    // the operand it started from, so one compare catches it either way.
+    if (subtract) {
+        out.push_back(make_inst(Opcode::cmp_lt_u, IrType::i1, make_reg("cf", IrType::i1),
+                                {lhs, rhs}, address));
+    } else {
+        out.push_back(make_inst(Opcode::cmp_lt_u, IrType::i1, make_reg("cf", IrType::i1),
+                                {result, lhs}, address));
+    }
+
+    // Signed overflow, by the usual sign-bit trick. An add overflows when both
+    // operands shared a sign and the result came back with the other one; a sub
+    // overflows when the operands' signs differed and the result took the
+    // right-hand one's. Both come out as "these two xors agree in the sign bit",
+    // so it's the same three operations with different inputs, and testing a
+    // sign bit is just a signed compare against zero.
+    IrOperand first = new_temp(width);
+    IrOperand second = new_temp(width);
+    IrOperand both = new_temp(width);
+    if (subtract) {
+        out.push_back(make_inst(Opcode::bit_xor, width, first, {lhs, rhs}, address));
+        out.push_back(make_inst(Opcode::bit_xor, width, second, {lhs, result}, address));
+    } else {
+        out.push_back(make_inst(Opcode::bit_xor, width, first, {result, lhs}, address));
+        out.push_back(make_inst(Opcode::bit_xor, width, second, {result, rhs}, address));
+    }
+    out.push_back(make_inst(Opcode::bit_and, width, both, {first, second}, address));
+    out.push_back(make_inst(Opcode::cmp_lt_s, IrType::i1, make_reg("of", IrType::i1), {both, zero},
+                            address));
+}
+
+// add and sub between two registers, or a register and a constant. Both have the
+// same shape -- the destination doubles as the left-hand operand -- so the only
+// thing that changes between them is which opcode comes out and how the flags
+// are worked out, and `subtract` picks that.
+//
+// A memory operand on either side needs an address computing first, which is
+// step 42, so parse_operand rejecting it here is what we want.
+bool Lifter::lift_add_sub(const Instruction& insn, bool subtract, std::vector<IrInst>& out) {
+    std::vector<std::string_view> operands = split_operands(insn.op_str);
+    if (operands.size() != 2) {
+        return false;
+    }
+
+    std::optional<IrOperand> dst = parse_operand(operands[0], IrType::none);
+    if (!dst || dst->kind != OperandKind::reg) {
+        return false;
+    }
+
+    std::optional<IrOperand> src = parse_operand(operands[1], dst->type);
+    if (!src) {
+        return false;
+    }
+    // Same reasoning as in lift_mov: an encoding that assembles has both sides
+    // at one width, so a mismatch means we misread an operand.
+    if (src->kind == OperandKind::reg && src->type != dst->type) {
+        return false;
+    }
+
+    // The result goes into a temporary and only reaches the register on the last
+    // line. Since the destination is also the left-hand operand, writing it any
+    // earlier would leave the flag operations reading the value the instruction
+    // just produced instead of the one it started with.
+    IrOperand result = new_temp(dst->type);
+    out.push_back(make_inst(subtract ? Opcode::sub : Opcode::add, dst->type, result, {*dst, *src},
+                            insn.address));
+    emit_arith_flags(*dst, *src, result, subtract, insn.address, out);
+    out.push_back(make_inst(Opcode::assign, dst->type, *dst, {result}, insn.address));
+    return true;
+}
+
+// imul in the two forms that keep the product at the operand's own width: two
+// operands, where the destination is also the left factor, and three, where both
+// factors are written out. The one-operand form is the odd one -- it multiplies
+// rax and spreads a result twice as wide across rdx:rax, and there's no IR type
+// big enough to hold that, so it falls through to an unknown.
+//
+// mul, the unsigned one, only exists in that one-operand form, so it never
+// reaches here either. Which leaves nothing signed about this: the low half of a
+// product is the same bit pattern whichever way the operands are read, and that
+// is exactly why the compiler reaches for imul on unsigned code too.
+bool Lifter::lift_imul(const Instruction& insn, std::vector<IrInst>& out) {
+    std::vector<std::string_view> operands = split_operands(insn.op_str);
+    if (operands.size() != 2 && operands.size() != 3) {
+        return false;
+    }
+
+    std::optional<IrOperand> dst = parse_operand(operands[0], IrType::none);
+    if (!dst || dst->kind != OperandKind::reg) {
+        return false;
+    }
+
+    // With two operands the destination stands in as the left factor; with three
+    // it is only a destination and the left factor is the second operand.
+    IrOperand lhs = *dst;
+    std::string_view rhs_text = operands[1];
+    if (operands.size() == 3) {
+        std::optional<IrOperand> named = parse_operand(operands[1], IrType::none);
+        if (!named || named->kind != OperandKind::reg || named->type != dst->type) {
+            return false;
+        }
+        lhs = *named;
+        rhs_text = operands[2];
+    }
+
+    std::optional<IrOperand> rhs = parse_operand(rhs_text, dst->type);
+    if (!rhs) {
+        return false;
+    }
+    if (rhs->kind == OperandKind::reg && rhs->type != dst->type) {
+        return false;
+    }
+
+    // No flag operations. imul sets cf and of when the full product needed more
+    // room than the destination had, which we'd have to multiply at double width
+    // to find out, and it leaves zf, sf, pf and af undefined -- so there's
+    // nothing here that could be written correctly.
+    out.push_back(make_inst(Opcode::mul, dst->type, *dst, {lhs, *rhs}, insn.address));
+    return true;
+}
+
+// div and idiv, which take one operand, divide the pair rdx:rax by it, and leave
+// the quotient in rax and the remainder in rdx.
+//
+// The dividend being twice as wide as everything else is the awkward part, and
+// again there's no IR type for it. What rescues us is that compilers never use
+// the extra width: an unsigned divide is always set up by something that clears
+// rdx ("xor edx, edx") and a signed one by cdq or cqo, which fills rdx with
+// copies of rax's sign bit. Either way the real dividend is just rax widened, so
+// dividing rax at its own width gives the same answer.
+//
+// Hand-written or obfuscated code that puts a genuine value in rdx does get
+// lifted wrong by this. It's the first place we produce an answer instead of an
+// unknown without being able to show it's right, and it deserves another look
+// once step 45 can trace back what actually wrote rdx.
+bool Lifter::lift_div(const Instruction& insn, bool is_signed, std::vector<IrInst>& out) {
+    std::vector<std::string_view> operands = split_operands(insn.op_str);
+    if (operands.size() != 1) {
+        return false;
+    }
+
+    // There is no immediate form of div, so a constant here means we misread the
+    // operand rather than that the instruction divides by a literal.
+    std::optional<IrOperand> divisor = parse_operand(operands[0], IrType::none);
+    if (!divisor || divisor->kind != OperandKind::reg) {
+        return false;
+    }
+
+    std::optional<DivisionRegisters> regs = division_registers(divisor->type);
+    if (!regs) {
+        return false;
+    }
+
+    IrType width = divisor->type;
+    IrOperand accumulator = make_reg(regs->accumulator, width);
+    IrOperand quotient = new_temp(width);
+    IrOperand remainder = new_temp(width);
+
+    // Both halves are computed before either register is written, for the same
+    // reason as in lift_add_sub: the remainder still needs the old accumulator,
+    // and the quotient would have overwritten it.
+    out.push_back(make_inst(is_signed ? Opcode::div_s : Opcode::div_u, width, quotient,
+                            {accumulator, *divisor}, insn.address));
+    out.push_back(make_inst(is_signed ? Opcode::rem_s : Opcode::rem_u, width, remainder,
+                            {accumulator, *divisor}, insn.address));
+    out.push_back(make_inst(Opcode::assign, width, accumulator, {quotient}, insn.address));
+    out.push_back(make_inst(Opcode::assign, width, make_reg(regs->remainder, width), {remainder},
+                            insn.address));
+
+    // div and idiv leave every flag undefined, so there is nothing to emit.
+    return true;
+}
+
 std::vector<IrInst> Lifter::lift(const Instruction& insn) {
     std::vector<IrInst> out;
 
@@ -265,6 +496,27 @@ std::vector<IrInst> Lifter::lift(const Instruction& insn) {
 
     if (insn.mnemonic == "mov" || insn.mnemonic == "movabs") {
         if (lift_mov(insn, out)) {
+            return out;
+        }
+        out.clear();
+    }
+
+    if (insn.mnemonic == "add" || insn.mnemonic == "sub") {
+        if (lift_add_sub(insn, insn.mnemonic == "sub", out)) {
+            return out;
+        }
+        out.clear();
+    }
+
+    if (insn.mnemonic == "imul") {
+        if (lift_imul(insn, out)) {
+            return out;
+        }
+        out.clear();
+    }
+
+    if (insn.mnemonic == "div" || insn.mnemonic == "idiv") {
+        if (lift_div(insn, insn.mnemonic == "idiv", out)) {
             return out;
         }
         out.clear();
