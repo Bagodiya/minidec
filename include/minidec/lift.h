@@ -22,13 +22,19 @@ namespace minidec {
 // later step can be tested by handing over a single Instruction and reading back
 // the operations, without having to build a whole function first.
 //
-// Only a small slice of x86 is handled so far -- moves between registers and
-// constants, nop, and the integer arithmetic that works register to register.
-// Everything else becomes a single Opcode::unknown, which is deliberate: an
-// instruction we can't model yet still shows up in the right place in the
-// stream, so the passes downstream see a gap rather than a wrong answer, and the
-// function around it stays analysable. Memory, branches and calls each get
+// Only a small slice of x86 is handled so far -- moves between registers,
+// constants and memory, nop, and the integer arithmetic that works register to
+// register. Everything else becomes a single Opcode::unknown, which is
+// deliberate: an instruction we can't model yet still shows up in the right
+// place in the stream, so the passes downstream see a gap rather than a wrong
+// answer, and the function around it stays analysable. Branches and calls get
 // filled in over the steps after this one.
+
+// The pieces of an x86 memory operand once the text has been picked apart --
+// base register, scaled index, displacement and the width being accessed. Only
+// the lifter's own helpers ever handle one, so it's defined in lift.cpp rather
+// than here.
+struct MemoryOperand;
 
 // How wide a machine register is, or nothing if the name isn't one we know.
 // Covers the 64/32/16/8-bit integer registers under their usual names plus the
@@ -64,9 +70,26 @@ private:
     // touched it when the operands aren't a shape we can model. These are
     // members rather than file-local helpers because they all invent
     // temporaries, and the counter for those lives here.
+    bool lift_mov(const Instruction& insn, std::vector<IrInst>& out);
     bool lift_add_sub(const Instruction& insn, bool subtract, std::vector<IrInst>& out);
     bool lift_imul(const Instruction& insn, std::vector<IrInst>& out);
     bool lift_div(const Instruction& insn, bool is_signed, std::vector<IrInst>& out);
+
+    // The two halves of a mov with a memory operand on one side. `reg_text` is
+    // the other operand's text, still unparsed, since how wide it should be read
+    // at depends on the memory operand sitting opposite it.
+    bool lift_load(const Instruction& insn, std::string_view reg_text, const MemoryOperand& mem,
+                   std::vector<IrInst>& out);
+    bool lift_store(const Instruction& insn, const MemoryOperand& mem, std::string_view value_text,
+                    std::vector<IrInst>& out);
+
+    // Work the address out into ordinary arithmetic, appending whatever it takes
+    // to `out`, and hand back the operand holding it. Always succeeds -- a
+    // MemoryOperand that got past parsing is one we can compute -- so callers
+    // must finish checking everything else before they call this, since it emits
+    // as it goes.
+    IrOperand emit_address(const MemoryOperand& mem, const Instruction& insn,
+                           std::vector<IrInst>& out);
 
     // The flag writes shared by add and sub, given the two operands and the
     // temporary holding the result.

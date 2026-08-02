@@ -7,6 +7,23 @@
 
 namespace minidec {
 
+// Everything an x86 address can be built out of: base + index*scale + disp, with
+// any of the three left out. That's the whole addressing mode, which is why the
+// IR doesn't need one -- the lifter takes this apart into adds and a multiply
+// once here, and no later pass ever has to know the form existed.
+//
+// `width` is how much memory the access touches, taken from the "qword ptr" the
+// operand text starts with. It belongs to the access rather than the address, but
+// it's parsed out of the same operand so it rides along in here.
+struct MemoryOperand {
+    IrType width = IrType::none;
+    std::string base;         // empty when the address has no base register
+    std::string index;        // empty when there's no index
+    std::uint64_t scale = 1;  // 1, 2, 4 or 8; only meaningful with an index
+    std::uint64_t disp = 0;   // already wrapped to 64 bits, so a negative
+                              // displacement is its two's complement
+};
+
 namespace {
 
 // The legacy register names, which have to be a table because there's no rule
@@ -160,9 +177,9 @@ std::uint64_t mask_to_width(std::uint64_t value, IrType type) {
 // width so they ignore the hint; a constant has no width of its own in the text,
 // so it takes whatever the instruction is working at.
 //
-// Anything else -- a memory reference, an xmm register, a segment override --
-// comes back as nothing, and the caller turns the whole instruction into an
-// unknown rather than lifting half of it.
+// Anything else -- an xmm register, a memory reference the caller hasn't already
+// pulled out with parse_memory -- comes back as nothing, and the caller turns the
+// whole instruction into an unknown rather than lifting half of it.
 std::optional<IrOperand> parse_operand(std::string_view text, IrType width_hint) {
     text = trim(text);
     if (text.empty()) {
@@ -230,17 +247,301 @@ IrInst make_unknown(std::uint64_t address) {
     return inst;
 }
 
-// mov and movabs, in the forms where both operands are registers or the source
-// is a constant. Either way it's a straight copy, so one assign covers it.
-// A mov with a memory operand on either side is a load or a store and needs the
-// address worked out first, which is step 42, so it isn't handled here.
+// A memory operand is the only thing capstone puts brackets in, so one character
+// is enough to tell it apart from a register or a constant. Whether we can
+// actually model it is parse_memory's problem.
+bool is_memory_text(std::string_view text) {
+    return text.find('[') != std::string_view::npos;
+}
+
+// The size keyword capstone puts in front of the brackets. The ones missing are
+// the widths the IR has no type for -- tbyte is the 80-bit x87 format, and
+// xmmword and up are the vector registers -- so an access at one of those has to
+// become an unknown.
+std::optional<IrType> memory_width(std::string_view keyword) {
+    if (keyword == "byte") {
+        return IrType::i8;
+    }
+    if (keyword == "word") {
+        return IrType::i16;
+    }
+    if (keyword == "dword") {
+        return IrType::i32;
+    }
+    if (keyword == "qword") {
+        return IrType::i64;
+    }
+    return std::nullopt;
+}
+
+// Fold one term of an address -- a register, a scaled index, or a number -- into
+// the operand being built. `negate` says the term came after a minus sign.
+bool apply_address_term(MemoryOperand& mem, std::string_view term, bool negate) {
+    std::size_t star = term.find('*');
+    if (star != std::string_view::npos) {
+        // A scaled index, and there's only ever one of them per address.
+        if (negate || !mem.index.empty()) {
+            return false;
+        }
+
+        std::string_view name = trim(term.substr(0, star));
+        std::optional<IrType> type = register_type(name);
+        if (!type || *type != IrType::i64) {
+            return false;
+        }
+
+        std::optional<std::uint64_t> scale = parse_immediate(trim(term.substr(star + 1)));
+        if (!scale || (*scale != 1 && *scale != 2 && *scale != 4 && *scale != 8)) {
+            return false;
+        }
+
+        mem.index = std::string(name);
+        mem.scale = *scale;
+        return true;
+    }
+
+    if (std::optional<IrType> type = register_type(term)) {
+        // Registers are only ever added, and only at the full 64 bits: a 32-bit
+        // base means the instruction carried an address-size prefix, which
+        // truncates the address in a way plain arithmetic on i64 wouldn't show.
+        if (negate || *type != IrType::i64) {
+            return false;
+        }
+
+        if (mem.base.empty()) {
+            mem.base = std::string(term);
+        } else if (mem.index.empty()) {
+            // "[rax + rbx]" -- the second register is the index, scaled by one.
+            mem.index = std::string(term);
+            mem.scale = 1;
+        } else {
+            return false;
+        }
+        return true;
+    }
+
+    std::optional<std::uint64_t> value = parse_immediate(term);
+    if (!value) {
+        return false;
+    }
+    // Adding rather than assigning so that an address written with more than one
+    // constant in it still comes out right. Unsigned arithmetic wraps, which is
+    // what we want for the minus case -- the result is the displacement's two's
+    // complement, and adding that is the same as subtracting.
+    mem.disp = negate ? mem.disp - *value : mem.disp + *value;
+    return true;
+}
+
+// Pick apart something like "qword ptr [rbp + rax*8 - 0x10]". Anything we can't
+// model comes back as nothing and the instruction ends up an unknown, so this
+// stays strict: it's better to lose a mov than to invent an address.
+std::optional<MemoryOperand> parse_memory(std::string_view text) {
+    text = trim(text);
+    std::size_t open = text.find('[');
+    std::size_t close = text.find(']');
+    if (open == std::string_view::npos || close != text.size() - 1 || close < open) {
+        return std::nullopt;
+    }
+
+    MemoryOperand mem;
+
+    std::string_view prefix = trim(text.substr(0, open));
+    if (!prefix.empty()) {
+        // A segment override, "qword ptr fs:[0x28]" and friends. The segment base
+        // isn't in the instruction or in any register we can read, so there's no
+        // honest address to compute -- this is where the stack cookie lives, and
+        // it stops here.
+        if (prefix.find(':') != std::string_view::npos) {
+            return std::nullopt;
+        }
+
+        std::size_t space = prefix.find(' ');
+        if (space == std::string_view::npos || trim(prefix.substr(space)) != "ptr") {
+            return std::nullopt;
+        }
+
+        std::optional<IrType> width = memory_width(trim(prefix.substr(0, space)));
+        if (!width) {
+            return std::nullopt;
+        }
+        mem.width = *width;
+    }
+
+    // The terms between the brackets, split on the + and - that separate them.
+    // Neither sign can turn up inside a term: a register name has no punctuation
+    // and capstone prints a negative displacement by writing the minus out as the
+    // separator instead of attaching it to the number.
+    std::string_view inner = text.substr(open + 1, close - open - 1);
+    bool negate = false;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i <= inner.size(); ++i) {
+        bool at_end = i == inner.size();
+        if (!at_end && inner[i] != '+' && inner[i] != '-') {
+            continue;
+        }
+
+        std::string_view term = trim(inner.substr(start, i - start));
+        if (term.empty() || !apply_address_term(mem, term, negate)) {
+            return std::nullopt;
+        }
+
+        if (!at_end) {
+            negate = inner[i] == '-';
+            start = i + 1;
+        }
+    }
+
+    return mem;
+}
+
+}  // namespace
+
+std::optional<IrType> register_type(std::string_view name) {
+    const auto& table = legacy_registers();
+    auto found = table.find(name);
+    if (found != table.end()) {
+        return found->second;
+    }
+    return numbered_register_type(name);
+}
+
+IrOperand Lifter::new_temp(IrType type) {
+    return make_temp(next_temp_++, type);
+}
+
+// base + index*scale + disp, spelled out as the multiply and adds it actually
+// is. Rule 2 of the IR says a load or a store is handed a value, not an address
+// expression, and this is what pays for that: the addressing mode is unpicked
+// here, once, and after this an address is just another i64 like any other.
+//
+// Every part is optional, so most addresses cost far less than the full form --
+// "[rbp - 8]" is one add, and "[rax]" doesn't emit anything at all.
+IrOperand Lifter::emit_address(const MemoryOperand& mem, const Instruction& insn,
+                               std::vector<IrInst>& out) {
+    const IrType width = IrType::i64;
+    std::uint64_t disp = mem.disp;
+    bool has_base = !mem.base.empty();
+
+    // rip isn't a register we can read the way the others are read: it holds the
+    // address of the *next* instruction while this one runs, and that's a number
+    // we already know here. So it folds into the displacement and disappears,
+    // which is what turns a rip-relative access into a plain absolute one.
+    if (mem.base == "rip") {
+        disp += insn.address + insn.size;
+        has_base = false;
+    }
+
+    std::optional<IrOperand> address;
+    if (has_base) {
+        address = make_reg(mem.base, width);
+    }
+
+    if (!mem.index.empty()) {
+        IrOperand index = make_reg(mem.index, width);
+        if (mem.scale != 1) {
+            IrOperand scaled = new_temp(width);
+            out.push_back(make_inst(Opcode::mul, width, scaled,
+                                    {index, make_imm(mem.scale, width)}, insn.address));
+            index = scaled;
+        }
+
+        if (address) {
+            IrOperand sum = new_temp(width);
+            out.push_back(make_inst(Opcode::add, width, sum, {*address, index}, insn.address));
+            address = sum;
+        } else {
+            address = index;
+        }
+    }
+
+    // No registers at all, so the address was known when the program was linked
+    // and it's just a constant.
+    if (!address) {
+        return make_imm(disp, width);
+    }
+
+    if (disp == 0) {
+        return *address;
+    }
+
+    // A negative displacement is already stored as its two's complement, so this
+    // one add covers both directions.
+    IrOperand sum = new_temp(width);
+    out.push_back(
+        make_inst(Opcode::add, width, sum, {*address, make_imm(disp, width)}, insn.address));
+    return sum;
+}
+
+// A mov reading memory into a register.
+bool Lifter::lift_load(const Instruction& insn, std::string_view reg_text, const MemoryOperand& mem,
+                       std::vector<IrInst>& out) {
+    std::optional<IrOperand> dst = parse_operand(reg_text, IrType::none);
+    if (!dst || dst->kind != OperandKind::reg) {
+        return false;
+    }
+
+    // The size keyword and the register have to agree. They always do in an
+    // encoding that assembles, so if they don't we misread one of them and
+    // guessing which would mean reading the wrong number of bytes.
+    if (mem.width != IrType::none && mem.width != dst->type) {
+        return false;
+    }
+
+    IrOperand address = emit_address(mem, insn, out);
+    out.push_back(make_inst(Opcode::load, dst->type, *dst, {address}, insn.address));
+    return true;
+}
+
+// A mov writing a register or a constant out to memory.
+bool Lifter::lift_store(const Instruction& insn, const MemoryOperand& mem,
+                        std::string_view value_text, std::vector<IrInst>& out) {
+    // Only the size keyword says how wide the write is here. A register source
+    // would say the same thing, but "mov dword ptr [rbp - 4], 5" has nothing else
+    // to go on, so we need the keyword either way.
+    if (mem.width == IrType::none) {
+        return false;
+    }
+
+    std::optional<IrOperand> value = parse_operand(value_text, mem.width);
+    if (!value || (value->kind == OperandKind::reg && value->type != mem.width)) {
+        return false;
+    }
+
+    IrOperand address = emit_address(mem, insn, out);
+    out.push_back(
+        make_inst(Opcode::store, mem.width, IrOperand{}, {address, *value}, insn.address));
+    return true;
+}
+
+// mov and movabs. Between registers, or from a constant, it's a straight copy
+// and one assign covers it; with memory on one side it becomes an address
+// calculation and a load or a store.
 //
 // Returns false without touching `out` when the operands aren't a shape we
 // understand, so the caller can fall back to an unknown.
-bool lift_mov(const Instruction& insn, std::vector<IrInst>& out) {
+bool Lifter::lift_mov(const Instruction& insn, std::vector<IrInst>& out) {
     std::vector<std::string_view> operands = split_operands(insn.op_str);
     if (operands.size() != 2) {
         return false;
+    }
+
+    bool dst_in_memory = is_memory_text(operands[0]);
+    bool src_in_memory = is_memory_text(operands[1]);
+
+    // x86 has no memory-to-memory mov, so seeing brackets on both sides means we
+    // read the operand text wrong rather than that such an instruction exists.
+    if (dst_in_memory && src_in_memory) {
+        return false;
+    }
+
+    if (src_in_memory) {
+        std::optional<MemoryOperand> mem = parse_memory(operands[1]);
+        return mem && lift_load(insn, operands[0], *mem, out);
+    }
+
+    if (dst_in_memory) {
+        std::optional<MemoryOperand> mem = parse_memory(operands[0]);
+        return mem && lift_store(insn, *mem, operands[1], out);
     }
 
     std::optional<IrOperand> dst = parse_operand(operands[0], IrType::none);
@@ -260,29 +561,8 @@ bool lift_mov(const Instruction& insn, std::vector<IrInst>& out) {
         return false;
     }
 
-    IrInst assign;
-    assign.op = Opcode::assign;
-    assign.type = dst->type;
-    assign.dst = *dst;
-    assign.args.push_back(*src);
-    assign.address = insn.address;
-    out.push_back(std::move(assign));
+    out.push_back(make_inst(Opcode::assign, dst->type, *dst, {*src}, insn.address));
     return true;
-}
-
-}  // namespace
-
-std::optional<IrType> register_type(std::string_view name) {
-    const auto& table = legacy_registers();
-    auto found = table.find(name);
-    if (found != table.end()) {
-        return found->second;
-    }
-    return numbered_register_type(name);
-}
-
-IrOperand Lifter::new_temp(IrType type) {
-    return make_temp(next_temp_++, type);
 }
 
 // x86 updates six flags after an add or a sub and we write four of them. zf and
@@ -343,8 +623,10 @@ void Lifter::emit_arith_flags(const IrOperand& lhs, const IrOperand& rhs, const 
 // thing that changes between them is which opcode comes out and how the flags
 // are worked out, and `subtract` picks that.
 //
-// A memory operand on either side needs an address computing first, which is
-// step 42, so parse_operand rejecting it here is what we want.
+// An operand in memory would work the same way it does in a mov -- load it,
+// operate, store it back where it came from -- but that's a shape of its own and
+// none of it is written yet, so parse_operand rejecting brackets here is what we
+// want and the instruction becomes an unknown.
 bool Lifter::lift_add_sub(const Instruction& insn, bool subtract, std::vector<IrInst>& out) {
     std::vector<std::string_view> operands = split_operands(insn.op_str);
     if (operands.size() != 2) {
