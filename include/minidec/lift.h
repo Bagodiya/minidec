@@ -23,12 +23,12 @@ namespace minidec {
 // the operations, without having to build a whole function first.
 //
 // Only a small slice of x86 is handled so far -- moves between registers,
-// constants and memory, nop, and the integer arithmetic that works register to
-// register. Everything else becomes a single Opcode::unknown, which is
-// deliberate: an instruction we can't model yet still shows up in the right
-// place in the stream, so the passes downstream see a gap rather than a wrong
-// answer, and the function around it stays analysable. Branches and calls get
-// filled in over the steps after this one.
+// constants and memory, nop, the integer arithmetic that works register to
+// register, and the jumps. Everything else becomes a single Opcode::unknown,
+// which is deliberate: an instruction we can't model yet still shows up in the
+// right place in the stream, so the passes downstream see a gap rather than a
+// wrong answer, and the function around it stays analysable. Calls are the next
+// thing to go in, in step 44.
 
 // The pieces of an x86 memory operand once the text has been picked apart --
 // base register, scaled index, displacement and the width being accessed. Only
@@ -74,6 +74,16 @@ private:
     bool lift_add_sub(const Instruction& insn, bool subtract, std::vector<IrInst>& out);
     bool lift_imul(const Instruction& insn, std::vector<IrInst>& out);
     bool lift_div(const Instruction& insn, bool is_signed, std::vector<IrInst>& out);
+    bool lift_jmp(const Instruction& insn, std::vector<IrInst>& out);
+    bool lift_jcc(const Instruction& insn, std::vector<IrInst>& out);
+
+    // Work out the i1 a conditional jump is testing and hand back the operand
+    // holding it, which for the single-flag conditions is just the flag register
+    // itself and for the rest is a temporary. Comes back as nothing, without
+    // having emitted anything, when the mnemonic isn't a conditional jump we
+    // know -- the table lookup happens before the first operation goes out.
+    std::optional<IrOperand> emit_condition(std::string_view mnemonic, std::uint64_t address,
+                                            std::vector<IrInst>& out);
 
     // The two halves of a mov with a memory operand on one side. `reg_text` is
     // the other operand's text, still unparsed, since how wide it should be read

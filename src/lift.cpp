@@ -235,6 +235,81 @@ std::optional<DivisionRegisters> division_registers(IrType type) {
     }
 }
 
+// Where a direct branch goes. Capstone works the arithmetic out for us and
+// prints the destination of a pc-relative jump as a plain absolute address, so
+// there's nothing to add to anything here -- read the number back and that's the
+// target. An indirect jump has a register or a memory reference in the operand
+// instead, and no address we could know before the program runs, so it comes
+// back as nothing and the caller deals with it.
+std::optional<std::uint64_t> branch_target(const Instruction& insn) {
+    if (!insn.is_relative) {
+        return std::nullopt;
+    }
+    return parse_immediate(trim(insn.op_str));
+}
+
+// What a conditional jump is actually asking about. x86 has thirty-odd of them
+// but only eight distinct questions, because each one comes in a pair: ja is jbe
+// with the answer turned round, jne is je turned round, and so on. So the
+// mnemonic table below maps onto one of these plus a flag saying which half of
+// the pair it is, and the emitter only has to build eight things.
+enum class FlagTest {
+    overflow,     // of
+    carry,        // cf                -- unsigned <
+    zero,         // zf
+    below_equal,  // cf | zf           -- unsigned <=
+    sign,         // sf
+    parity,       // pf
+    less,         // sf != of          -- signed <
+    less_equal,   // zf | (sf != of)   -- signed <=
+};
+
+struct ConditionCode {
+    FlagTest test;
+    bool negate;  // the jn... spelling, taken when the test comes out false
+};
+
+// Every conditional jump mnemonic, with the aliases. Capstone normally settles
+// on one spelling per condition (je rather than jz, jb rather than jc), but the
+// others are in here anyway -- they cost a line each and it saves this quietly
+// falling apart if a capstone version prints one of them.
+//
+// jcxz, jrcxz and the loop instructions are the ones left out. They test rcx
+// rather than a flag, and loop decrements it on the way past, so neither fits
+// the shape here and both become unknowns until there's a reason to want them.
+std::optional<ConditionCode> condition_code(std::string_view mnemonic) {
+    static const std::unordered_map<std::string_view, ConditionCode> table = {
+        {"jo", {FlagTest::overflow, false}},     {"jno", {FlagTest::overflow, true}},
+
+        {"jb", {FlagTest::carry, false}},        {"jc", {FlagTest::carry, false}},
+        {"jnae", {FlagTest::carry, false}},      {"jae", {FlagTest::carry, true}},
+        {"jnb", {FlagTest::carry, true}},        {"jnc", {FlagTest::carry, true}},
+
+        {"je", {FlagTest::zero, false}},         {"jz", {FlagTest::zero, false}},
+        {"jne", {FlagTest::zero, true}},         {"jnz", {FlagTest::zero, true}},
+
+        {"jbe", {FlagTest::below_equal, false}}, {"jna", {FlagTest::below_equal, false}},
+        {"ja", {FlagTest::below_equal, true}},   {"jnbe", {FlagTest::below_equal, true}},
+
+        {"js", {FlagTest::sign, false}},         {"jns", {FlagTest::sign, true}},
+
+        {"jp", {FlagTest::parity, false}},       {"jpe", {FlagTest::parity, false}},
+        {"jnp", {FlagTest::parity, true}},       {"jpo", {FlagTest::parity, true}},
+
+        {"jl", {FlagTest::less, false}},         {"jnge", {FlagTest::less, false}},
+        {"jge", {FlagTest::less, true}},         {"jnl", {FlagTest::less, true}},
+
+        {"jle", {FlagTest::less_equal, false}},  {"jng", {FlagTest::less_equal, false}},
+        {"jg", {FlagTest::less_equal, true}},    {"jnle", {FlagTest::less_equal, true}},
+    };
+
+    auto found = table.find(mnemonic);
+    if (found == table.end()) {
+        return std::nullopt;
+    }
+    return found->second;
+}
+
 // The placeholder for an instruction we can't model yet. It writes nothing and
 // reads nothing, which is a lie, but it's a lie in the right place: a pass that
 // walks the IR sees an operation it has to treat as opaque instead of quietly
@@ -762,6 +837,161 @@ bool Lifter::lift_div(const Instruction& insn, bool is_signed, std::vector<IrIns
     return true;
 }
 
+// The flag reads behind one conditional jump. The four single-flag conditions
+// don't cost an operation at all -- the flag register is already an i1, so the
+// branch can read it where it sits -- and the other four are one or two
+// operations on top of that.
+//
+// Nothing here writes a flag, it only reads them, so this is where the two flags
+// emit_arith_flags leaves alone come home to roost. jp and jnp read a pf that
+// nothing in the lifter has written, so the branch they produce is reading a
+// stale value. Lifting them anyway is still the better of the two options: an
+// unknown in the middle of a function costs us the whole block after it, while
+// this at least has the shape right and points at the one register that needs
+// fixing once there's a reason to compute parity.
+std::optional<IrOperand> Lifter::emit_condition(std::string_view mnemonic, std::uint64_t address,
+                                                std::vector<IrInst>& out) {
+    std::optional<ConditionCode> code = condition_code(mnemonic);
+    if (!code) {
+        return std::nullopt;
+    }
+
+    const IrType bit = IrType::i1;
+    IrOperand condition;
+
+    switch (code->test) {
+    case FlagTest::overflow:
+        condition = make_reg("of", bit);
+        break;
+    case FlagTest::carry:
+        condition = make_reg("cf", bit);
+        break;
+    case FlagTest::zero:
+        condition = make_reg("zf", bit);
+        break;
+    case FlagTest::sign:
+        condition = make_reg("sf", bit);
+        break;
+    case FlagTest::parity:
+        condition = make_reg("pf", bit);
+        break;
+    case FlagTest::below_equal:
+        // Unsigned <=, which is < or equal, which is cf or zf.
+        condition = new_temp(bit);
+        out.push_back(make_inst(Opcode::bit_or, bit, condition,
+                                {make_reg("cf", bit), make_reg("zf", bit)}, address));
+        break;
+    case FlagTest::less:
+        // Signed <. The subtraction the compare did came out negative, or it
+        // overflowed and came out positive when it shouldn't have -- either way
+        // the two flags disagree, and they agree when the result was really
+        // positive. Hence a straight comparison of sf against of.
+        condition = new_temp(bit);
+        out.push_back(make_inst(Opcode::cmp_ne, bit, condition,
+                                {make_reg("sf", bit), make_reg("of", bit)}, address));
+        break;
+    case FlagTest::less_equal: {
+        IrOperand differs = new_temp(bit);
+        out.push_back(make_inst(Opcode::cmp_ne, bit, differs,
+                                {make_reg("sf", bit), make_reg("of", bit)}, address));
+        condition = new_temp(bit);
+        out.push_back(
+            make_inst(Opcode::bit_or, bit, condition, {make_reg("zf", bit), differs}, address));
+        break;
+    }
+    }
+
+    // The jn... half of the pair. bit_not on a one-bit value is just the flip,
+    // so the negated conditions cost one operation more than the plain ones and
+    // don't need their own arm above.
+    if (code->negate) {
+        IrOperand flipped = new_temp(bit);
+        out.push_back(make_inst(Opcode::bit_not, bit, flipped, {condition}, address));
+        condition = flipped;
+    }
+
+    return condition;
+}
+
+// jmp, in all three of its forms. The direct one is the easy case and by far the
+// common one: capstone hands over the destination address and it goes straight
+// into the operation.
+//
+// The indirect forms have the address in a register or in memory, and there's no
+// number we can put in the operation for them -- which is fine, since jump's
+// argument is an ordinary operand and a register is an ordinary operand. The IR
+// ends up saying "control goes wherever this value points", which is the honest
+// answer and as much as anyone can say without tracing what wrote the register.
+bool Lifter::lift_jmp(const Instruction& insn, std::vector<IrInst>& out) {
+    const IrType width = IrType::i64;
+
+    if (std::optional<std::uint64_t> target = branch_target(insn)) {
+        out.push_back(make_inst(Opcode::jump, IrType::none, IrOperand{},
+                                {make_imm(*target, width)}, insn.address));
+        return true;
+    }
+
+    std::vector<std::string_view> operands = split_operands(insn.op_str);
+    if (operands.size() != 1) {
+        return false;
+    }
+
+    if (!is_memory_text(operands[0])) {
+        // "jmp rax". A jump through a 32-bit register isn't a thing in 64-bit
+        // mode, so anything narrower means we misread the operand.
+        std::optional<IrOperand> target = parse_operand(operands[0], IrType::none);
+        if (!target || target->kind != OperandKind::reg || target->type != width) {
+            return false;
+        }
+        out.push_back(make_inst(Opcode::jump, IrType::none, IrOperand{}, {*target}, insn.address));
+        return true;
+    }
+
+    // "jmp qword ptr [rax*8 + 0x4020]", which is a switch statement nine times
+    // out of ten. The destination is sitting in the jump table rather than in
+    // the instruction, so read it out and jump to whatever came back.
+    std::optional<MemoryOperand> mem = parse_memory(operands[0]);
+    if (!mem || (mem->width != IrType::none && mem->width != width)) {
+        return false;
+    }
+
+    IrOperand address = emit_address(*mem, insn, out);
+    IrOperand loaded = new_temp(width);
+    out.push_back(make_inst(Opcode::load, width, loaded, {address}, insn.address));
+    out.push_back(make_inst(Opcode::jump, IrType::none, IrOperand{}, {loaded}, insn.address));
+    return true;
+}
+
+// One conditional jump: the flag test, then the branch that reads it.
+//
+// Both destinations are written out, the taken one and the fall-through, even
+// though the fall-through is only ever the next instruction and any pass could
+// work that out for itself. It's the same reasoning as everywhere else in the
+// IR -- a pass shouldn't have to know how long the instruction it's looking at
+// was, or have the rest of the stream on hand, to find out where a branch can
+// go. Both edges are right there in the operation.
+bool Lifter::lift_jcc(const Instruction& insn, std::vector<IrInst>& out) {
+    // There's no indirect form of a conditional jump -- the encoding only takes
+    // a relative offset -- so a target we couldn't read means we misread the
+    // operand rather than that the jump goes somewhere we can't name.
+    std::optional<std::uint64_t> target = branch_target(insn);
+    if (!target) {
+        return false;
+    }
+
+    std::optional<IrOperand> condition = emit_condition(insn.mnemonic, insn.address, out);
+    if (!condition) {
+        return false;
+    }
+
+    const IrType width = IrType::i64;
+    std::uint64_t fall_through = insn.address + insn.size;
+    out.push_back(make_inst(Opcode::branch, IrType::none, IrOperand{},
+                            {*condition, make_imm(*target, width), make_imm(fall_through, width)},
+                            insn.address));
+    return true;
+}
+
 std::vector<IrInst> Lifter::lift(const Instruction& insn) {
     std::vector<IrInst> out;
 
@@ -799,6 +1029,24 @@ std::vector<IrInst> Lifter::lift(const Instruction& insn) {
 
     if (insn.mnemonic == "div" || insn.mnemonic == "idiv") {
         if (lift_div(insn, insn.mnemonic == "idiv", out)) {
+            return out;
+        }
+        out.clear();
+    }
+
+    if (insn.mnemonic == "jmp") {
+        if (lift_jmp(insn, out)) {
+            return out;
+        }
+        out.clear();
+    }
+
+    // Anything else starting with a j is a conditional jump, or close enough to
+    // try: lift_jcc looks the mnemonic up in its own table, so the handful that
+    // aren't -- jrcxz, and loop if capstone ever spells it with a j -- back out
+    // of here and end up as unknowns like anything else we don't model.
+    if (!insn.mnemonic.empty() && insn.mnemonic.front() == 'j') {
+        if (lift_jcc(insn, out)) {
             return out;
         }
         out.clear();
