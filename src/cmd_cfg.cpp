@@ -16,18 +16,14 @@ namespace minidec {
 
 namespace {
 
-// Same 16-hex-digit addresses the disasm and symbols listings print, so a block
-// header lines up with the instructions underneath it.
+// Same addresses the disasm listing prints, so headers line up with instructions.
 std::string format_addr(std::uint64_t addr) {
     char buf[17];
     std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(addr));
     return std::string(buf);
 }
 
-// Find the code section. ELF calls it ".text", Mach-O "__TEXT,__text". Same
-// reasoning as in cmd_disasm: go straight for the code section rather than
-// looking up whichever section covers the symbol's address, because in a
-// relocatable .o every section still starts at address 0.
+// ELF calls it ".text", Mach-O "__TEXT,__text". Same reasoning as cmd_disasm.
 const Section* find_text_section(const Binary& bin) {
     for (const Section& sec : bin.sections) {
         if (sec.name == ".text" || sec.name.find("__text") != std::string::npos) {
@@ -37,9 +33,7 @@ const Section* find_text_section(const Binary& bin) {
     return nullptr;
 }
 
-// One instruction as a single line of text, mnemonic padded out to `mnem_w` so
-// the operands line up under each other. Both output formats want the same line,
-// the text one prints it directly and the dot one packs it into a node label.
+// One instruction, mnemonic padded to `mnem_w`. Both output formats use this.
 std::string format_insn(const Instruction& insn, std::size_t mnem_w) {
     std::string line = insn.mnemonic;
     if (!insn.op_str.empty()) {
@@ -52,10 +46,8 @@ std::string format_insn(const Instruction& insn, std::size_t mnem_w) {
     return line;
 }
 
-// Graphviz reads a quoted label until the closing quote, so a backslash or a
-// quote inside one has to be escaped or the file won't parse. Operand text is
-// nearly always plain, but AT&T-style operands and the .byte placeholders we
-// emit for undecodable bytes can carry either, so don't assume.
+// Graphviz reads a quoted label to the closing quote, so backslashes and quotes
+// inside need escaping. AT&T operands and .byte placeholders can carry both.
 std::string escape_label(const std::string& text) {
     std::string out;
     out.reserve(text.size());
@@ -89,8 +81,7 @@ void emit_text(const CFG& cfg, const std::string& func,
                       << "\n";
         }
 
-        // No successors means the block ends the function, either on a ret or on a
-        // branch we couldn't follow. Say so rather than printing an empty list.
+        // A ret, or a branch we couldn't follow. Say so rather than print nothing.
         if (block.successors.empty()) {
             std::cout << "  -> (none)\n";
             continue;
@@ -111,12 +102,86 @@ void emit_text(const CFG& cfg, const std::string& func,
     }
 }
 
-// The same graph as a Graphviz file, so you can run it through
-// `dot -Tpng` and actually look at the shape of a function.
+// Block addresses to sorted b-numbers. The sets are unordered, so without this
+// the same function prints its dominators differently each run.
+std::vector<std::size_t> numbered(const std::unordered_set<std::uint64_t>& addresses,
+                                  const std::unordered_map<std::uint64_t, std::size_t>& index) {
+    std::vector<std::size_t> out;
+    out.reserve(addresses.size());
+    for (std::uint64_t address : addresses) {
+        auto it = index.find(address);
+        if (it != index.end()) {
+            out.push_back(it->second);
+        }
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+void print_blocks(const std::vector<std::size_t>& blocks) {
+    for (std::size_t b : blocks) {
+        std::cout << " b" << b;
+    }
+}
+
+// Which blocks dominate each block. Reads as "you cannot reach b3 without going
+// through b0 and b1 first".
+void emit_dominators(const CFG& cfg,
+                     const std::unordered_map<std::uint64_t, std::size_t>& block_index) {
+    DominatorSets dominators = compute_dominators(cfg);
+
+    std::cout << "\ndominators:\n";
+    for (std::size_t i = 0; i < cfg.blocks.size(); ++i) {
+        auto found = dominators.find(cfg.blocks[i].start);
+        std::cout << "  b" << i << " <-";
+        if (found == dominators.end()) {
+            std::cout << " (none)";
+        } else {
+            print_blocks(numbered(found->second, block_index));
+        }
+        std::cout << "\n";
+    }
+}
+
+// Every natural loop, i.e. every back edge and the blocks it wraps around.
+void emit_loops(const CFG& cfg,
+                const std::unordered_map<std::uint64_t, std::size_t>& block_index) {
+    DominatorSets dominators = compute_dominators(cfg);
+    std::vector<NaturalLoop> loops = find_natural_loops(cfg, dominators);
+
+    std::cout << "\nloops: " << loops.size() << "\n";
+    for (const NaturalLoop& loop : loops) {
+        auto header = block_index.find(loop.header);
+        auto latch = block_index.find(loop.latch);
+        if (header == block_index.end() || latch == block_index.end()) {
+            continue;
+        }
+
+        std::cout << "  header b" << header->second << ", latch b" << latch->second << ", body";
+        print_blocks(numbered(loop.body, block_index));
+        std::cout << "\n";
+    }
+}
+
+// The order a forward dataflow pass should walk the blocks in.
+void emit_reverse_postorder(const CFG& cfg,
+                            const std::unordered_map<std::uint64_t, std::size_t>& block_index) {
+    std::vector<std::uint64_t> order = compute_reverse_postorder(cfg);
+
+    std::cout << "\nreverse postorder:";
+    for (std::uint64_t address : order) {
+        auto it = block_index.find(address);
+        if (it != block_index.end()) {
+            std::cout << " b" << it->second;
+        }
+    }
+    std::cout << "\n";
+}
+
+// The graph as Graphviz, for `dot -Tpng`.
 //
-// Blocks come out as left-aligned boxes in a fixed-width font: "\l" is graphviz's
-// line break that also left-aligns the line it ends, which a plain "\n" doesn't
-// do, and without it every instruction ends up centered and unreadable.
+// "\l" is the line break that also left-aligns; a plain "\n" centres every
+// instruction and the result is unreadable.
 void emit_dot(const CFG& cfg, const std::string& func,
               const std::unordered_map<std::uint64_t, std::size_t>& block_index,
               std::size_t mnem_w) {
@@ -133,8 +198,7 @@ void emit_dot(const CFG& cfg, const std::string& func,
         }
         std::cout << "\"";
 
-        // The entry block gets a heavier border so it's obvious where to start
-        // reading; dot lays blocks out top-down but that ordering isn't a promise.
+        // Heavier border on the entry: dot's top-down layout isn't a promise.
         if (block.start == cfg.entry) {
             std::cout << ", penwidth=2";
         }
@@ -145,9 +209,8 @@ void emit_dot(const CFG& cfg, const std::string& func,
     for (std::size_t i = 0; i < cfg.blocks.size(); ++i) {
         const BasicBlock& block = cfg.blocks[i];
 
-        // connect_blocks pushes the branch target first and the fall-through
-        // second, so a block with two edges is a conditional and we can label the
-        // two sides without having to look at the terminator again.
+        // connect_blocks pushes target then fall-through, so two edges means a
+        // conditional and the sides can be labelled without re-reading the terminator.
         bool conditional = block.successors.size() == 2;
 
         for (std::size_t s = 0; s < block.successors.size(); ++s) {
@@ -172,6 +235,7 @@ int cmd_cfg(const ParsedArgs& args) {
     if (args.positionals.empty()) {
         std::cerr << "cfg: no input file given\n";
         std::cerr << "usage: minidec cfg <file> --func <name> [--format text|dot]\n";
+        std::cerr << "       [--dominators] [--loops] [--rpo] [--all]\n";
         return 1;
     }
 
@@ -181,8 +245,7 @@ int cmd_cfg(const ParsedArgs& args) {
         return 1;
     }
 
-    // Check the format before loading anything so a typo fails straight away
-    // instead of after we've parsed a binary. No --format means the text listing.
+    // Checked before loading, so a typo fails straight away.
     bool as_dot = false;
     if (args.has_option("format")) {
         std::string choice = args.option("format");
@@ -221,9 +284,7 @@ int cmd_cfg(const ParsedArgs& args) {
         return 1;
     }
 
-    // The section's virtual address maps to bytes[0], so subtracting gives the
-    // offset of the function inside the copy we hold. Check the end against the
-    // bytes we really have -- a bogus symbol size would otherwise read past them.
+    // Virtual address maps to bytes[0]. Guard the end against a bogus size.
     std::uint64_t offset = sym->address - sec->address;
     std::uint64_t end = offset + sym->size;
     if (offset >= sec->bytes.size() || end > sec->bytes.size()) {
@@ -231,9 +292,8 @@ int cmd_cfg(const ParsedArgs& args) {
         return 1;
     }
 
-    // Intel syntax only here. The CFG doesn't care which dialect the operands are
-    // printed in, and jump_target() in cfg.cpp reads the target off the operand
-    // text, which capstone writes as a bare address either way.
+    // Intel only: the CFG doesn't care about dialect, and jump_target() reads a
+    // bare address either way.
     Disassembler dis(Syntax::intel);
     if (!dis.is_open()) {
         std::cerr << "cfg: couldn't start the disassembler\n";
@@ -256,17 +316,14 @@ int cmd_cfg(const ParsedArgs& args) {
     }
     cfg.entry = cfg.blocks.front().start;
 
-    // Blocks get printed as b0, b1, ... in address order, which reads a lot better
-    // than a bare address in the successor lists. Successors are stored as
-    // addresses, so keep a map from start address back to the number we gave it.
+    // Successors are stored as addresses, so map them back to the b-numbers.
     std::unordered_map<std::uint64_t, std::size_t> block_index;
     block_index.reserve(cfg.blocks.size());
     for (std::size_t i = 0; i < cfg.blocks.size(); ++i) {
         block_index[cfg.blocks[i].start] = i;
     }
 
-    // Pad the mnemonics to the widest one in the whole function so the operand
-    // column stays put across blocks instead of jumping around per block.
+    // Widest mnemonic in the function, so the operand column doesn't jump per block.
     std::size_t mnem_w = 0;
     for (const Instruction& insn : insns) {
         mnem_w = std::max(mnem_w, insn.mnemonic.size());
@@ -274,8 +331,21 @@ int cmd_cfg(const ParsedArgs& args) {
 
     if (as_dot) {
         emit_dot(cfg, func, block_index, mnem_w);
-    } else {
-        emit_text(cfg, func, block_index, mnem_w);
+        return 0;
+    }
+
+    emit_text(cfg, func, block_index, mnem_w);
+
+    // Opt-in: the dominator listing outgrows the graph it describes fast.
+    bool all = args.has_option("all");
+    if (all || args.has_option("dominators")) {
+        emit_dominators(cfg, block_index);
+    }
+    if (all || args.has_option("loops")) {
+        emit_loops(cfg, block_index);
+    }
+    if (all || args.has_option("rpo")) {
+        emit_reverse_postorder(cfg, block_index);
     }
 
     return 0;
