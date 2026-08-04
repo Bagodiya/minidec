@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  # Matches what the project is developed against locally. LIEF moves its API
+  # around between releases, so this is pinned rather than tracking latest.
+  LIEF_VERSION: 0.17.6
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
@@ -14,13 +19,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install capstone
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake libcapstone-dev
 
+      # Ubuntu's liblief-dev stops at 0.9, which predates the API this uses (and
+      # isn't in noble at all), so take the SDK straight from the LIEF release.
+      - name: Install LIEF
+        run: |
+          curl -fsSL -o lief.tar.gz \
+            "https://github.com/lief-project/LIEF/releases/download/${LIEF_VERSION}/LIEF-${LIEF_VERSION}-Linux-x86_64.tar.gz"
+          mkdir -p "$HOME/lief"
+          tar -xzf lief.tar.gz -C "$HOME/lief" --strip-components=1
+
       - name: Configure
-        run: cmake -B build
+        run: cmake -B build -DCMAKE_PREFIX_PATH="$HOME/lief"
 
       - name: Build
         run: cmake --build build
