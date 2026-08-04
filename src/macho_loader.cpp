@@ -1,9 +1,12 @@
 #include "minidec/loader.h"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <fstream>
 #include <memory>
+#include <set>
+#include <utility>
 
 #include <LIEF/Abstract/Header.hpp>
 #include <LIEF/MachO/Binary.hpp>
@@ -41,9 +44,8 @@ std::uint64_t file_size_on_disk(const std::string& path) {
     return static_cast<std::uint64_t>(in.tellg());
 }
 
-// Mach-O names a section by both its segment and the section itself, so the same
-// short name (e.g. "__text") can show up under more than one segment. We glue
-// them together as "__SEGMENT,__section" which is how the toolchain spells it.
+// The same short name can appear under more than one segment, so join them as
+// "__SEGMENT,__section" the way the toolchain does.
 std::vector<Section> read_sections(const LIEF::MachO::Binary& macho) {
     std::vector<Section> out;
     for (const LIEF::MachO::Section& sec : macho.sections()) {
@@ -61,10 +63,7 @@ std::vector<Section> read_sections(const LIEF::MachO::Binary& macho) {
     return out;
 }
 
-// Mach-O symbols don't carry a "this is code / this is data" type the way ELF
-// ones do, so we work it out from where the symbol lands: an address inside an
-// executable section means a function, anything else inside a section is data,
-// and an undefined symbol (an import, no real address) goes in Other.
+// Mach-O has no code/data symbol type, so go by where the address lands.
 SymbolKind classify(const LIEF::MachO::Symbol& sym, const std::vector<Section>& sections) {
     if (sym.type() == LIEF::MachO::Symbol::TYPE::UNDEFINED) {
         return SymbolKind::Other;
@@ -81,13 +80,81 @@ SymbolKind classify(const LIEF::MachO::Symbol& sym, const std::vector<Section>& 
     return SymbolKind::Other;
 }
 
+// The section a symbol's address falls in, or nullptr if it's outside all of
+// them (an import, or the nameless zero-address entries).
+const Section* section_holding(const std::vector<Section>& sections, std::uint64_t address) {
+    for (const Section& sec : sections) {
+        if (sec.contains(address)) {
+            return &sec;
+        }
+    }
+    return nullptr;
+}
+
+// An nlist entry has no size field, so LIEF reports zero for every Mach-O symbol
+// and there's nothing to copy across. Without a size, disasm and cfg have no end
+// address to stop at.
+//
+// So measure each symbol against the next one along: symbols in a section sit
+// back to back, and the last runs to the end of the section. A function followed
+// by alignment padding over-measures, but padding is nops, so the disassembly
+// picks up a few extra instructions rather than going wrong.
+void infer_symbol_sizes(std::vector<Symbol>& symbols, const std::vector<Section>& sections) {
+    // Only symbols inside a section can be measured, and they need address order.
+    // Sort pointers so the caller's order survives.
+    std::vector<Symbol*> placed;
+    placed.reserve(symbols.size());
+    for (Symbol& sym : symbols) {
+        if (section_holding(sections, sym.address) != nullptr) {
+            placed.push_back(&sym);
+        }
+    }
+
+    std::sort(placed.begin(), placed.end(),
+              [](const Symbol* a, const Symbol* b) { return a->address < b->address; });
+
+    for (std::size_t i = 0; i < placed.size(); ++i) {
+        Symbol& sym = *placed[i];
+        if (sym.size != 0) {
+            continue;  // something already knew, don't second-guess it
+        }
+
+        const Section* sec = section_holding(sections, sym.address);
+        std::uint64_t end = sec->address + sec->size;
+
+        // Skip anything sharing this address, or two names for one function measure
+        // each other as zero bytes.
+        for (std::size_t j = i + 1; j < placed.size(); ++j) {
+            if (placed[j]->address <= sym.address) {
+                continue;
+            }
+            if (placed[j]->address < end) {
+                end = placed[j]->address;
+            }
+            break;
+        }
+
+        sym.size = end - sym.address;
+    }
+}
+
 std::vector<Symbol> read_symbols(const LIEF::MachO::Binary& macho,
                                  const std::vector<Section>& sections) {
     std::vector<Symbol> out;
+
+    // A defined-and-exported symbol appears in both the symbol table and the
+    // export trie, and LIEF returns both. The duplicate makes `symbols` print the
+    // function twice and gives symbol_by_name two identical entries.
+    std::set<std::pair<std::string, std::uint64_t>> seen;
+
     for (const LIEF::MachO::Symbol& sym : macho.symbols()) {
         if (sym.name().empty()) {
             continue;
         }
+        if (!seen.emplace(sym.name(), sym.value()).second) {
+            continue;
+        }
+
         Symbol s;
         s.name = sym.name();
         s.address = sym.value();
@@ -95,6 +162,8 @@ std::vector<Symbol> read_symbols(const LIEF::MachO::Binary& macho,
         s.kind = classify(sym, sections);
         out.push_back(std::move(s));
     }
+
+    infer_symbol_sizes(out, sections);
     return out;
 }
 
@@ -149,7 +218,7 @@ std::optional<Binary> load_binary(const std::string& path) {
         return std::nullopt;
     }
 
-    // Read the first four bytes and match them against the magic numbers we know.
+    // Match the first four bytes against the magic numbers we know.
     std::array<unsigned char, 4> magic{};
     in.read(reinterpret_cast<char*>(magic.data()), magic.size());
     if (in.gcount() < static_cast<std::streamsize>(magic.size())) {
@@ -161,9 +230,8 @@ std::optional<Binary> load_binary(const std::string& path) {
         return load_elf(path);
     }
 
-    // Thin Mach-O (0xfeedface / 0xfeedfacf) plus the fat/universal wrappers
-    // (0xcafebabe and its byte-swapped form). LIEF sorts out the endianness and
-    // the fat container for us, so we just need to spot the leading word.
+    // Thin Mach-O plus the fat wrappers. LIEF handles endianness and the fat
+    // container, so we only need to spot the leading word.
     std::uint32_t word = static_cast<std::uint32_t>(magic[0]) << 24 |
                          static_cast<std::uint32_t>(magic[1]) << 16 |
                          static_cast<std::uint32_t>(magic[2]) << 8 |
