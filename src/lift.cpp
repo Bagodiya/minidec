@@ -8,14 +8,11 @@
 
 namespace minidec {
 
-// Everything an x86 address can be built out of: base + index*scale + disp, with
-// any of the three left out. That's the whole addressing mode, which is why the
-// IR doesn't need one -- the lifter takes this apart into adds and a multiply
-// once here, and no later pass ever has to know the form existed.
+// base + index*scale + disp, any part optional. Taken apart into adds and a
+// multiply here so no later pass has to know addressing modes exist.
 //
-// `width` is how much memory the access touches, taken from the "qword ptr" the
-// operand text starts with. It belongs to the access rather than the address, but
-// it's parsed out of the same operand so it rides along in here.
+// `width` is the access size from the "qword ptr" prefix. It belongs to the
+// access rather than the address, but it parses out of the same operand.
 struct MemoryOperand {
     IrType width = IrType::none;
     std::string base;         // empty when the address has no base register
@@ -96,7 +93,6 @@ std::optional<IrType> numbered_register_type(std::string_view name) {
     return std::nullopt;
 }
 
-// Drop the spaces capstone leaves around operands once they're split apart.
 std::string_view trim(std::string_view text) {
     while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) {
         text.remove_prefix(1);
@@ -200,9 +196,8 @@ std::optional<IrOperand> parse_operand(std::string_view text, IrType width_hint)
     return std::nullopt;
 }
 
-// Build one operation in a single expression. The arithmetic below emits runs of
-// eight and nine operations at a time, and filling in five fields by hand each
-// time buried what the sequence was actually doing.
+// Build an operation in one expression, so the runs of eight and nine below read
+// as a sequence instead of as five field assignments each.
 IrInst make_inst(Opcode op, IrType type, IrOperand dst, std::vector<IrOperand> args,
                  std::uint64_t address) {
     IrInst inst;
@@ -249,20 +244,14 @@ std::optional<std::uint64_t> branch_target(const Instruction& insn) {
     return parse_immediate(trim(insn.op_str));
 }
 
-// Where the System V convention puts the first six integer arguments, in the
-// order they're filled. Anything past the sixth goes on the stack, and floats go
-// in xmm0 upwards, so neither is in here -- the stack arguments are ordinary
-// stores that the lifter has already emitted by the time the call comes round,
-// and the IR has no xmm registers to name.
+// The System V integer argument registers, in fill order. Stack arguments and
+// floats aren't here: the former are ordinary stores already emitted, the latter
+// need xmm registers the IR doesn't have.
 //
-// Nothing in the instruction says how many of these a particular call actually
-// reads, and there's no way to find out without looking at the callee. So the
-// call operation names all six. That's wrong in the sense that a one-argument
-// call doesn't read rsi, but it's wrong in the safe direction: a use-def pass
-// that thinks a register might be read leaves the code that wrote it alone,
-// where one that thinks it isn't would delete the argument setup of every call
-// it couldn't see through. Step 51 is where the list gets cut down to the
-// arguments a function really takes.
+// A call names all six because nothing in the instruction says how many it reads.
+// Over-stating is the safe direction -- a use-def pass that thinks a register
+// might be read leaves its producer alone, where the reverse would delete the
+// argument setup of every call it couldn't see through.
 const char* const argument_registers[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
 
 // What a conditional jump is actually asking about. x86 has thirty-odd of them
@@ -286,14 +275,12 @@ struct ConditionCode {
     bool negate;  // the jn... spelling, taken when the test comes out false
 };
 
-// Every conditional jump mnemonic, with the aliases. Capstone normally settles
-// on one spelling per condition (je rather than jz, jb rather than jc), but the
-// others are in here anyway -- they cost a line each and it saves this quietly
-// falling apart if a capstone version prints one of them.
+// Every conditional jump mnemonic. Capstone settles on one spelling per
+// condition, but the aliases cost a line each and stop this breaking quietly if
+// a version prints one of them.
 //
-// jcxz, jrcxz and the loop instructions are the ones left out. They test rcx
-// rather than a flag, and loop decrements it on the way past, so neither fits
-// the shape here and both become unknowns until there's a reason to want them.
+// jcxz, jrcxz and loop test rcx rather than a flag, so they don't fit and become
+// unknowns.
 std::optional<ConditionCode> condition_code(std::string_view mnemonic) {
     static const std::unordered_map<std::string_view, ConditionCode> table = {
         {"jo", {FlagTest::overflow, false}},     {"jno", {FlagTest::overflow, true}},
@@ -339,9 +326,8 @@ IrInst make_unknown(std::uint64_t address) {
     return inst;
 }
 
-// A memory operand is the only thing capstone puts brackets in, so one character
-// is enough to tell it apart from a register or a constant. Whether we can
-// actually model it is parse_memory's problem.
+// Brackets are the only thing capstone puts round a memory operand. Whether we
+// can model it is parse_memory's problem.
 bool is_memory_text(std::string_view text) {
     return text.find('[') != std::string_view::npos;
 }
@@ -657,16 +643,12 @@ bool Lifter::lift_mov(const Instruction& insn, std::vector<IrInst>& out) {
     return true;
 }
 
-// x86 updates six flags after an add or a sub and we write four of them. zf and
-// sf fall straight out of the result; cf and of cost a few extra operations
-// each, but every conditional jump in step 43 reads one of the four, so they
-// have to be here and they have to be right.
+// Four of the six flags an add or sub writes. Every conditional jump reads one
+// of these four, so they have to be right.
 //
-// pf and af are the two left out. af only matters to the BCD instructions, which
-// nothing has emitted in decades, and pf is the parity of the low byte, which
-// would need a popcount the IR has no opcode for. Neither is left holding a
-// wrong answer -- they just keep whatever they had before the instruction, which
-// a later pass can at least see is stale.
+// pf and af are left out: af only matters to the BCD instructions, and pf needs
+// a popcount the IR has no opcode for. Both keep their previous value, which a
+// later pass can at least see is stale.
 void Lifter::emit_arith_flags(const IrOperand& lhs, const IrOperand& rhs, const IrOperand& result,
                               bool subtract, std::uint64_t address, std::vector<IrInst>& out) {
     IrType width = result.type;
@@ -710,33 +692,131 @@ void Lifter::emit_arith_flags(const IrOperand& lhs, const IrOperand& rhs, const 
                             address));
 }
 
-// add and sub between two registers, or a register and a constant. Both have the
-// same shape -- the destination doubles as the left-hand operand -- so the only
-// thing that changes between them is which opcode comes out and how the flags
-// are worked out, and `subtract` picks that.
+// and, or, xor and test clear cf and of outright -- a bit operation has no carry
+// or overflow. zf and sf still come from the result.
 //
-// An operand in memory would work the same way it does in a mov -- load it,
-// operate, store it back where it came from -- but that's a shape of its own and
-// none of it is written yet, so parse_operand rejecting brackets here is what we
-// want and the instruction becomes an unknown.
-bool Lifter::lift_add_sub(const Instruction& insn, bool subtract, std::vector<IrInst>& out) {
+// Clearing them explicitly matters: "xor eax, eax" is how a compiler writes zero,
+// and a pass that saw cf untouched here would trace it back to whatever
+// arithmetic ran last and get an answer from the wrong instruction.
+void Lifter::emit_logic_flags(const IrOperand& result, std::uint64_t address,
+                              std::vector<IrInst>& out) {
+    const IrType bit = IrType::i1;
+    IrOperand zero = make_imm(0, result.type);
+
+    out.push_back(make_inst(Opcode::cmp_eq, bit, make_reg("zf", bit), {result, zero}, address));
+    out.push_back(make_inst(Opcode::cmp_lt_s, bit, make_reg("sf", bit), {result, zero}, address));
+    out.push_back(
+        make_inst(Opcode::assign, bit, make_reg("cf", bit), {make_imm(0, bit)}, address));
+    out.push_back(
+        make_inst(Opcode::assign, bit, make_reg("of", bit), {make_imm(0, bit)}, address));
+}
+
+// The two operands shared by the arithmetic, bitwise and compare instructions,
+// destination doubling as the left-hand side.
+//
+// The right-hand side may sit in memory ("add eax, dword ptr [rbp - 8]"). The
+// load is emitted here and `src` names the temporary it landed in, so the caller
+// only ever sees an ordinary register-to-register operation.
+//
+// Emits into `out` before knowing the instruction will lift, which is safe --
+// lift() discards the whole run and starts an unknown on any later failure.
+//
+// The reverse form, "add dword ptr [rbp - 8], eax", reads-operates-writes back
+// and isn't handled; it becomes an unknown.
+bool Lifter::read_binary_operands(const Instruction& insn, std::optional<IrOperand>& dst,
+                                  std::optional<IrOperand>& src, std::vector<IrInst>& out) {
     std::vector<std::string_view> operands = split_operands(insn.op_str);
     if (operands.size() != 2) {
         return false;
     }
+    if (is_memory_text(operands[0])) {
+        return false;
+    }
 
-    std::optional<IrOperand> dst = parse_operand(operands[0], IrType::none);
+    dst = parse_operand(operands[0], IrType::none);
     if (!dst || dst->kind != OperandKind::reg) {
         return false;
     }
 
-    std::optional<IrOperand> src = parse_operand(operands[1], dst->type);
+    if (is_memory_text(operands[1])) {
+        std::optional<MemoryOperand> mem = parse_memory(operands[1]);
+        if (!mem) {
+            return false;
+        }
+        // The size keyword and the register have to agree, same as in a load.
+        if (mem->width != IrType::none && mem->width != dst->type) {
+            return false;
+        }
+
+        IrOperand address = emit_address(*mem, insn, out);
+        IrOperand loaded = new_temp(dst->type);
+        out.push_back(make_inst(Opcode::load, dst->type, loaded, {address}, insn.address));
+        src = loaded;
+        return true;
+    }
+
+    src = parse_operand(operands[1], dst->type);
     if (!src) {
         return false;
     }
-    // Same reasoning as in lift_mov: an encoding that assembles has both sides
-    // at one width, so a mismatch means we misread an operand.
     if (src->kind == OperandKind::reg && src->type != dst->type) {
+        return false;
+    }
+    return true;
+}
+
+// cmp, which is a sub that throws the result away and keeps only the flags. It's
+// the instruction the whole conditional-jump path depends on: a compiler emits
+// cmp and then a jcc that reads what it wrote, so without this the branches
+// lifted above are reading flags left over from whatever arithmetic ran last.
+//
+// test is the same idea over bit_and, and the two live together here because the
+// only thing separating them is which operation runs and which flag set follows.
+bool Lifter::lift_cmp_test(const Instruction& insn, bool logical, std::vector<IrInst>& out) {
+    std::optional<IrOperand> dst;
+    std::optional<IrOperand> src;
+    if (!read_binary_operands(insn, dst, src, out)) {
+        return false;
+    }
+
+    // The result goes to a temporary and stays there. That's the whole difference
+    // from sub and and: neither operand is written back.
+    IrOperand result = new_temp(dst->type);
+    out.push_back(make_inst(logical ? Opcode::bit_and : Opcode::sub, dst->type, result,
+                            {*dst, *src}, insn.address));
+
+    if (logical) {
+        emit_logic_flags(result, insn.address, out);
+    } else {
+        emit_arith_flags(*dst, *src, result, true, insn.address, out);
+    }
+    return true;
+}
+
+// and, or and xor between two registers, or a register and a constant. Same
+// shape as add and sub -- destination doubles as the left operand -- with the
+// bitwise flag set instead of the arithmetic one.
+bool Lifter::lift_bitwise(const Instruction& insn, Opcode op, std::vector<IrInst>& out) {
+    std::optional<IrOperand> dst;
+    std::optional<IrOperand> src;
+    if (!read_binary_operands(insn, dst, src, out)) {
+        return false;
+    }
+
+    // Same ordering rule as lift_add_sub: compute into a temporary so the flag
+    // operations still see the operand the instruction started with.
+    IrOperand result = new_temp(dst->type);
+    out.push_back(make_inst(op, dst->type, result, {*dst, *src}, insn.address));
+    emit_logic_flags(result, insn.address, out);
+    out.push_back(make_inst(Opcode::assign, dst->type, *dst, {result}, insn.address));
+    return true;
+}
+
+// add and sub. Same shape, so `subtract` picks the opcode and the flag rule.
+bool Lifter::lift_add_sub(const Instruction& insn, bool subtract, std::vector<IrInst>& out) {
+    std::optional<IrOperand> dst;
+    std::optional<IrOperand> src;
+    if (!read_binary_operands(insn, dst, src, out)) {
         return false;
     }
 
@@ -752,16 +832,12 @@ bool Lifter::lift_add_sub(const Instruction& insn, bool subtract, std::vector<Ir
     return true;
 }
 
-// imul in the two forms that keep the product at the operand's own width: two
-// operands, where the destination is also the left factor, and three, where both
-// factors are written out. The one-operand form is the odd one -- it multiplies
-// rax and spreads a result twice as wide across rdx:rax, and there's no IR type
-// big enough to hold that, so it falls through to an unknown.
+// The two imul forms that keep the product at the operand's width. The
+// one-operand form spreads a double-width result across rdx:rax, which no IR type
+// holds, so it becomes an unknown -- as does mul, which only has that form.
 //
-// mul, the unsigned one, only exists in that one-operand form, so it never
-// reaches here either. Which leaves nothing signed about this: the low half of a
-// product is the same bit pattern whichever way the operands are read, and that
-// is exactly why the compiler reaches for imul on unsigned code too.
+// Nothing here is signedness-specific: the low half of a product is the same bit
+// pattern either way, which is why compilers use imul on unsigned code too.
 bool Lifter::lift_imul(const Instruction& insn, std::vector<IrInst>& out) {
     std::vector<std::string_view> operands = split_operands(insn.op_str);
     if (operands.size() != 2 && operands.size() != 3) {
@@ -802,20 +878,16 @@ bool Lifter::lift_imul(const Instruction& insn, std::vector<IrInst>& out) {
     return true;
 }
 
-// div and idiv, which take one operand, divide the pair rdx:rax by it, and leave
-// the quotient in rax and the remainder in rdx.
+// div and idiv: divide rdx:rax by the operand, quotient to rax, remainder to rdx.
 //
-// The dividend being twice as wide as everything else is the awkward part, and
-// again there's no IR type for it. What rescues us is that compilers never use
-// the extra width: an unsigned divide is always set up by something that clears
-// rdx ("xor edx, edx") and a signed one by cdq or cqo, which fills rdx with
-// copies of rax's sign bit. Either way the real dividend is just rax widened, so
-// dividing rax at its own width gives the same answer.
+// The double-width dividend has no IR type. Compilers never use the extra width
+// though -- an unsigned divide clears rdx first, a signed one runs cdq or cqo to
+// fill it with rax's sign bit -- so dividing rax at its own width gives the same
+// answer.
 //
-// Hand-written or obfuscated code that puts a genuine value in rdx does get
-// lifted wrong by this. It's the first place we produce an answer instead of an
-// unknown without being able to show it's right, and it deserves another look
-// once step 45 can trace back what actually wrote rdx.
+// Hand-written code with a real value in rdx lifts wrong here. It's the one place
+// we answer without being able to show we're right, and wants revisiting once
+// use-def can trace what wrote rdx.
 bool Lifter::lift_div(const Instruction& insn, bool is_signed, std::vector<IrInst>& out) {
     std::vector<std::string_view> operands = split_operands(insn.op_str);
     if (operands.size() != 1) {
@@ -854,18 +926,13 @@ bool Lifter::lift_div(const Instruction& insn, bool is_signed, std::vector<IrIns
     return true;
 }
 
-// The flag reads behind one conditional jump. The four single-flag conditions
-// don't cost an operation at all -- the flag register is already an i1, so the
-// branch can read it where it sits -- and the other four are one or two
-// operations on top of that.
+// The flag reads behind a conditional jump. The single-flag conditions cost
+// nothing -- a flag register is already an i1 -- and the rest are one or two
+// operations on top.
 //
-// Nothing here writes a flag, it only reads them, so this is where the two flags
-// emit_arith_flags leaves alone come home to roost. jp and jnp read a pf that
-// nothing in the lifter has written, so the branch they produce is reading a
-// stale value. Lifting them anyway is still the better of the two options: an
-// unknown in the middle of a function costs us the whole block after it, while
-// this at least has the shape right and points at the one register that needs
-// fixing once there's a reason to compute parity.
+// jp and jnp read a pf nothing writes, so those branches read a stale value.
+// Lifting them anyway beats the alternative: an unknown mid-function costs the
+// whole block after it, and this at least has the shape right.
 std::optional<IrOperand> Lifter::emit_condition(std::string_view mnemonic, std::uint64_t address,
                                                 std::vector<IrInst>& out) {
     std::optional<ConditionCode> code = condition_code(mnemonic);
@@ -930,15 +997,10 @@ std::optional<IrOperand> Lifter::emit_condition(std::string_view mnemonic, std::
     return condition;
 }
 
-// jmp, in all three of its forms. The direct one is the easy case and by far the
-// common one: capstone hands over the destination address and it goes straight
-// into the operation.
-//
-// The indirect forms have the address in a register or in memory, and there's no
-// number we can put in the operation for them -- which is fine, since jump's
-// argument is an ordinary operand and a register is an ordinary operand. The IR
-// ends up saying "control goes wherever this value points", which is the honest
-// answer and as much as anyone can say without tracing what wrote the register.
+// jmp in all three forms. Direct is the common case and capstone hands over the
+// address. The indirect forms have no number to put in the operation, so the
+// register or loaded value goes in instead and the IR says "control goes wherever
+// this points" -- as much as anyone can say without tracing the register.
 bool Lifter::lift_jmp(const Instruction& insn, std::vector<IrInst>& out) {
     const IrType width = IrType::i64;
 
@@ -979,14 +1041,11 @@ bool Lifter::lift_jmp(const Instruction& insn, std::vector<IrInst>& out) {
     return true;
 }
 
-// One conditional jump: the flag test, then the branch that reads it.
+// A conditional jump: the flag test, then the branch reading it.
 //
-// Both destinations are written out, the taken one and the fall-through, even
-// though the fall-through is only ever the next instruction and any pass could
-// work that out for itself. It's the same reasoning as everywhere else in the
-// IR -- a pass shouldn't have to know how long the instruction it's looking at
-// was, or have the rest of the stream on hand, to find out where a branch can
-// go. Both edges are right there in the operation.
+// Both destinations are spelled out, including the fall-through, so a pass can
+// see where a branch goes without knowing the instruction's length or holding the
+// rest of the stream.
 bool Lifter::lift_jcc(const Instruction& insn, std::vector<IrInst>& out) {
     // There's no indirect form of a conditional jump -- the encoding only takes
     // a relative offset -- so a target we couldn't read means we misread the
@@ -1009,31 +1068,22 @@ bool Lifter::lift_jcc(const Instruction& insn, std::vector<IrInst>& out) {
     return true;
 }
 
-// call, in the same three forms jmp comes in: a direct address, a register, or a
-// memory reference that has to be read first. That part is lift_jmp again almost
-// line for line -- what makes a call different is everything around the target.
+// call, in the same three forms as jmp. The target resolution is lift_jmp again;
+// what differs is everything around it.
 //
-// The operation ends up with the target as its first argument and the six
-// convention registers after it, and rax as its destination. All seven of those
-// are guesses in the same direction: we say the call might read each argument
-// register and does write rax, because over-stating a read and a write is what
-// keeps a later pass from deleting something the callee needed.
+// The operation takes the target plus all six argument registers, and writes rax.
+// Every one of those is an over-statement in the safe direction, so a later pass
+// doesn't delete something the callee needed.
 //
-// Two things this doesn't say, both worth writing down because they'll matter in
-// step 45. The first is that a call clobbers rcx, rdx, rsi, rdi and r8 through
-// r11 as well as rax -- they're caller-saved, so whatever they held before is
-// gone afterwards, and an IrInst has one destination slot and no way to spell
-// that. Until there's somewhere to put it, use-def has to treat a call as
-// clobbering the caller-saved set on its own. The second is a float or a struct
-// coming back somewhere other than rax, which needs the xmm registers the IR
-// doesn't have yet.
+// Two things it can't say, both of which use-def will have to handle itself. A
+// call also clobbers the rest of the caller-saved set, and IrInst has one
+// destination slot with nowhere to put that. And a float or struct return comes
+// back somewhere other than rax, which needs xmm registers the IR lacks.
 //
-// What it deliberately leaves out is the stack. A call pushes a return address
-// and moves rsp down eight bytes, but the callee's ret takes both back, so from
-// where the caller is standing rsp is exactly where it was. Writing the push out
-// here without the matching pop -- which happens in another function entirely,
-// one we may never have lifted -- would shift every rsp-relative offset after
-// the call by eight and quietly break the stack variables in step 48.
+// The stack is left alone deliberately. A call pushes a return address and the
+// callee's ret pops it, so rsp is unchanged from the caller's view. Writing the
+// push without the matching pop -- which happens in a function we may never lift
+// -- would shift every rsp-relative offset after the call by eight.
 bool Lifter::lift_call(const Instruction& insn, std::vector<IrInst>& out) {
     const IrType width = IrType::i64;
     std::optional<IrOperand> target;
@@ -1085,16 +1135,12 @@ bool Lifter::lift_call(const Instruction& insn, std::vector<IrInst>& out) {
 
 // ret, which reads rax and leaves.
 //
-// Naming rax is the same bet as naming all six argument registers at a call: a
-// void function leaves nothing meaningful in it, but saying the return reads it
-// keeps whatever computed it alive, and a return value that got thrown away is a
-// much cheaper mistake than a return value that got deleted. Step 52 is where a
-// function that doesn't return anything loses the argument.
+// Naming rax is the same bet as naming the argument registers at a call: a void
+// function leaves nothing meaningful there, but a discarded return value is a
+// much cheaper mistake than a deleted one.
 //
-// "ret 0x10" pops that many bytes of arguments on the way out, and we take it
-// without doing anything about the number. Nothing downstream can tell: control
-// has left the function, so the value rsp ends up with isn't read by anything we
-// go on to lift. Refusing it would cost us the whole return for no gain.
+// "ret 0x10" pops that many bytes of arguments, and we ignore the number --
+// control has left the function, so nothing we go on to lift reads that rsp.
 bool Lifter::lift_ret(const Instruction& insn, std::vector<IrInst>& out) {
     out.push_back(make_inst(Opcode::ret, IrType::none, IrOperand{},
                             {make_reg("rax", IrType::i64)}, insn.address));
@@ -1124,6 +1170,25 @@ std::vector<IrInst> Lifter::lift(const Instruction& insn) {
 
     if (insn.mnemonic == "add" || insn.mnemonic == "sub") {
         if (lift_add_sub(insn, insn.mnemonic == "sub", out)) {
+            return out;
+        }
+        out.clear();
+    }
+
+    // cmp and test come before the arithmetic below because they share its
+    // operand shape but write no destination.
+    if (insn.mnemonic == "cmp" || insn.mnemonic == "test") {
+        if (lift_cmp_test(insn, insn.mnemonic == "test", out)) {
+            return out;
+        }
+        out.clear();
+    }
+
+    if (insn.mnemonic == "and" || insn.mnemonic == "or" || insn.mnemonic == "xor") {
+        Opcode op = insn.mnemonic == "and"  ? Opcode::bit_and
+                    : insn.mnemonic == "or" ? Opcode::bit_or
+                                            : Opcode::bit_xor;
+        if (lift_bitwise(insn, op, out)) {
             return out;
         }
         out.clear();
