@@ -9,16 +9,13 @@
 #include "minidec/cfg.h"
 #include "minidec/disasm.h"
 
-// The CFG passes only ever read an instruction's address, size, mnemonic,
-// operand text and branch flags, so these tests build the Instruction structs
-// by hand rather than running real machine code through capstone. That way I
-// get to draw the graph shape I want to test instead of hunting for bytes that
-// happen to produce it, and the expected answers stay fixed.
+// The CFG passes only read address, size, mnemonic, operand text and branch
+// flags, so these build Instructions by hand instead of running bytes through
+// capstone. Lets me draw the graph shape I want rather than hunt for an encoding
+// that produces it.
 //
-// The addresses in each shape are laid out contiguously (every instruction
-// starts where the one before it ended) because group_into_blocks treats a
-// block's end address as the start of the next block. Sizes are plausible x86
-// lengths but nothing here depends on them being the real encoding.
+// Addresses are contiguous because group_into_blocks treats a block's end as the
+// next block's start. Sizes are plausible but nothing depends on them.
 
 namespace {
 
@@ -26,8 +23,7 @@ using minidec::BasicBlock;
 using minidec::CFG;
 using minidec::Instruction;
 
-// Anything that isn't a branch: arithmetic, moves, compares. The operand text
-// doesn't matter to the CFG, it's only there so the shapes read like code.
+// Operand text doesn't matter to the CFG; it's there so the shapes read like code.
 Instruction plain(std::uint64_t address, std::uint16_t size, std::string mnemonic,
                   std::string operands) {
     Instruction insn;
@@ -38,10 +34,8 @@ Instruction plain(std::uint64_t address, std::uint16_t size, std::string mnemoni
     return insn;
 }
 
-// A direct jump, conditional or not. connect_blocks decides which by comparing
-// the mnemonic against "jmp", and it reads the destination back out of the
-// operand text, so the target has to be written the way capstone writes it: a
-// bare hex address.
+// connect_blocks tells conditional from unconditional by the mnemonic and reads
+// the target out of the operand text, so it has to be a bare hex address.
 Instruction direct_jump(std::uint64_t address, std::uint16_t size, std::string mnemonic,
                         std::uint64_t target) {
     Instruction insn;
@@ -107,7 +101,7 @@ CFG build_cfg(const std::vector<Instruction>& instructions) {
 //   0x1010  ret                  block D, 0x1010 .. 0x1011
 //
 // A branches to either B or C and both of them end up at D, which is the
-// diamond the structuring step in phase 7 is eventually going to look for.
+// diamond an if/else eventually has to be recovered from.
 std::vector<Instruction> diamond() {
     return {
         plain(0x1000, 2, "test", "edi, edi"),

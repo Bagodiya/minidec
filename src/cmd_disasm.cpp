@@ -18,17 +18,14 @@ namespace minidec {
 
 namespace {
 
-// Same 16-hex-digit address format the symbols listing uses, kept here so the
-// two commands print addresses the same way.
+// Same format the symbols listing uses.
 std::string format_addr(std::uint64_t addr) {
     char buf[17];
     std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(addr));
     return std::string(buf);
 }
 
-// Turn the raw instruction bytes into "48 89 e5" style hex, one space between
-// bytes. objdump prints them this way and it's handy when you want to eyeball
-// the encoding, so we do the same.
+// "48 89 e5" style hex, the way objdump prints it.
 std::string format_bytes(const std::vector<std::uint8_t>& bytes) {
     std::string out;
     out.reserve(bytes.size() * 3);
@@ -43,14 +40,11 @@ std::string format_bytes(const std::vector<std::uint8_t>& bytes) {
     return out;
 }
 
-// Find the code section. ELF calls it ".text", Mach-O names it "__TEXT,__text",
-// so match either. Returns nullptr if there's no text section.
+// ELF calls it ".text", Mach-O "__TEXT,__text".
 //
-// We go straight for .text instead of hunting for whichever section covers the
-// address because in a relocatable .o every section still sits at address 0, so
-// an address lookup would happily grab .strtab or .data instead. Functions live
-// in the code section anyway, and a symbol's address there is just its offset
-// into it, which is exactly what we need to slice the bytes.
+// Going straight for the code section rather than looking up whichever section
+// covers the address: in a relocatable .o every section still starts at 0, so an
+// address lookup would happily return .strtab.
 const Section* find_text_section(const Binary& bin) {
     for (const Section& sec : bin.sections) {
         if (sec.name == ".text" || sec.name.find("__text") != std::string::npos) {
@@ -60,10 +54,8 @@ const Section* find_text_section(const Binary& bin) {
     return nullptr;
 }
 
-// ANSI color for a control-flow instruction, or an empty string for the plain
-// ones. calls, jumps and returns each get their own color so they pop out when
-// you're scanning a listing. Returns a std::string so the caller can just check
-// .empty() and not worry about whether to print a reset afterwards.
+// A colour per control-flow kind, or empty for the plain ones. Returned as a
+// string so the caller can check .empty() before printing a reset.
 std::string flow_color(const Instruction& insn) {
     if (insn.is_call) {
         return "\033[32m";  // green
@@ -77,21 +69,16 @@ std::string flow_color(const Instruction& insn) {
     return "";
 }
 
-// For a direct call/jmp, capstone hands us the target as a plain address in the
-// operand string (e.g. "0x1140"). Try to match that address to a symbol so we
-// can print its name next to the operand, the way objdump does. Returns the
-// name, or "" when this isn't a direct branch or nothing in the table sits on
-// that address.
+// Match a direct branch's target against the symbol table so the listing can
+// print "call 0x1140 <puts>". Empty when it isn't direct or nothing matches.
 std::string resolve_target(const Binary& bin, const Instruction& insn) {
-    // Only direct branches carry an address we can resolve. Indirect ones (call
-    // rax, jmp [rip+..]) have a register or memory operand instead, so skip them.
+    // Indirect branches have a register or memory operand, nothing to resolve.
     if (!insn.is_relative || !(insn.is_call || insn.is_jump)) {
         return "";
     }
 
-    // strtoull instead of stoull so a weird operand can't throw at us. If it
-    // doesn't consume the whole string it wasn't a bare address, so don't trust
-    // the result.
+    // strtoull so a weird operand can't throw. Partial consumption means it wasn't
+    // a bare address.
     const char* start = insn.op_str.c_str();
     char* stop = nullptr;
     std::uint64_t target = std::strtoull(start, &stop, 0);
@@ -116,7 +103,7 @@ int cmd_disasm(const ParsedArgs& args) {
         return 1;
     }
 
-    // --func is required; without a function name we don't know what to decode.
+
     std::string func = args.option("func");
     if (func.empty()) {
         std::cerr << "disasm: no function given (pass --func <name>)\n";
@@ -136,16 +123,13 @@ int cmd_disasm(const ParsedArgs& args) {
         return 1;
     }
 
-    // A size of zero means the symbol table never recorded how long the function
-    // is, so we've got no byte range to hand to capstone. Bail rather than guess.
+    // No size means no byte range to hand capstone. Bail rather than guess.
     if (sym->size == 0) {
         std::cerr << "disasm: '" << func << "' has no size, can't tell where it ends\n";
         return 1;
     }
 
-    // Work out the syntax before we touch the binary so a typo fails fast. No
-    // --syntax means Intel; anything other than the two we know about is a user
-    // mistake worth pointing out rather than silently ignoring.
+    // Check the syntax before loading anything so a typo fails fast.
     Syntax syntax = Syntax::intel;
     if (args.has_option("syntax")) {
         std::string choice = args.option("syntax");
@@ -169,10 +153,8 @@ int cmd_disasm(const ParsedArgs& args) {
         return 1;
     }
 
-    // Work out where the function sits inside the section's bytes. The section's
-    // virtual address maps to bytes[0], so subtract to get the offset. Guard the
-    // end against the bytes we actually have -- a stripped or bogus size could
-    // run past what we copied, and slicing past the buffer would read garbage.
+    // The section's virtual address maps to bytes[0], so subtracting gives the
+    // offset. Guard the end: a bogus size would otherwise read past the buffer.
     std::uint64_t offset = sym->address - sec->address;
     std::uint64_t end = offset + sym->size;
     if (offset >= sec->bytes.size() || end > sec->bytes.size()) {
@@ -194,10 +176,8 @@ int cmd_disasm(const ParsedArgs& args) {
         return 1;
     }
 
-    // The address is a fixed 16 digits, but the byte column and the mnemonic both
-    // vary in width from one function to the next, so measure them first and pad
-    // every row to the widest one. Same trick the symbols listing uses. Operands
-    // go last so they don't need padding.
+    // The byte and mnemonic columns vary per function, so measure first and pad to
+    // the widest. Operands go last and need no padding.
     std::vector<std::string> byte_cols;
     byte_cols.reserve(insns.size());
     std::size_t byte_w = 0;
@@ -208,9 +188,7 @@ int cmd_disasm(const ParsedArgs& args) {
         mnem_w = std::max(mnem_w, insn.mnemonic.size());
     }
 
-    // Color is on by default but we skip it when --no-color is passed or when
-    // stdout isn't a terminal (piped to a file or another program), otherwise the
-    // escape codes end up as junk in the redirected output.
+    // Off when redirected, or the escape codes end up as junk in the output.
     bool use_color = !args.has_option("no-color") && isatty(STDOUT_FILENO);
 
     std::cout << func << ":\n";
@@ -219,9 +197,7 @@ int cmd_disasm(const ParsedArgs& args) {
         std::cout << format_addr(insn.address) << ":  " << std::left
                   << std::setw(static_cast<int>(byte_w)) << byte_cols[i] << "  ";
 
-        // Can't hand the colored mnemonic to std::setw: it counts the escape
-        // characters too and the padding comes out wrong. So print the color,
-        // the mnemonic, the reset, then pad by hand to the real text width.
+        // setw counts the escape characters, so pad by hand to the real width.
         std::string color = use_color ? flow_color(insn) : "";
         std::cout << color << insn.mnemonic;
         if (!color.empty()) {
@@ -234,8 +210,7 @@ int cmd_disasm(const ParsedArgs& args) {
         if (!insn.op_str.empty()) {
             std::cout << "  " << insn.op_str;
 
-            // Tack on the symbol name for a direct call/jmp so you can read
-            // "call 0x1140 <puts>" instead of chasing the bare address.
+
             std::string target = resolve_target(*bin, insn);
             if (!target.empty()) {
                 std::cout << " <" << target << ">";

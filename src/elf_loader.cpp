@@ -13,10 +13,8 @@ namespace minidec {
 
 namespace {
 
-// Map LIEF's architecture enum onto the short names we use elsewhere. Only the
-// ones we actually expect to deal with are spelled out; anything else returns
-// an empty string so the caller can tell "didn't recognize it" apart from a
-// real answer.
+// Empty string for anything unrecognised, so the caller can tell that apart from
+// a real answer.
 std::string arch_name(LIEF::Header::ARCHITECTURES arch) {
     switch (arch) {
         case LIEF::Header::ARCHITECTURES::X86_64:
@@ -32,8 +30,8 @@ std::string arch_name(LIEF::Header::ARCHITECTURES arch) {
     }
 }
 
-// Size of the file on disk in bytes. Open at the end and read back the offset.
-// Returns 0 if the file won't open, which lines up with the default in Binary.
+// Open at the end and read back the offset. 0 if the file won't open, matching
+// Binary's default.
 std::uint64_t file_size_on_disk(const std::string& path) {
     std::ifstream in(path, std::ios::binary | std::ios::ate);
     if (!in) {
@@ -42,10 +40,8 @@ std::uint64_t file_size_on_disk(const std::string& path) {
     return static_cast<std::uint64_t>(in.tellg());
 }
 
-// Pull every section out of the parsed ELF and turn it into our own Section
-// type. We copy the bytes across so the rest of the program doesn't have to
-// keep the LIEF object alive. Sections like .bss carry no data on disk, so
-// content() comes back empty there and bytes just stays empty too.
+// Bytes are copied so nothing downstream has to keep the LIEF object alive.
+// .bss and friends carry no data on disk, so their bytes stay empty.
 std::vector<Section> read_sections(const LIEF::ELF::Binary& elf) {
     std::vector<Section> out;
     for (const LIEF::ELF::Section& sec : elf.sections()) {
@@ -63,9 +59,7 @@ std::vector<Section> read_sections(const LIEF::ELF::Binary& elf) {
     return out;
 }
 
-// Boil LIEF's symbol type down to the three buckets we care about. The ELF spec
-// has more (sections, files, TLS, ...) but for decompilation we only really need
-// to know "is this code or is this data", so the rest lands in Other.
+// The ELF spec has more types than this, but code against data is what matters.
 SymbolKind classify(LIEF::ELF::Symbol::TYPE type) {
     switch (type) {
         case LIEF::ELF::Symbol::TYPE::FUNC:
@@ -78,11 +72,8 @@ SymbolKind classify(LIEF::ELF::Symbol::TYPE type) {
     }
 }
 
-// Walk the symbol table and copy out the entries that are useful to us.
-// symbols() covers both the static (.symtab) and dynamic (.dynsym) tables.
-// We drop the nameless ones up front -- things like section and file symbols
-// show up with no name and there's nothing the later passes can do with them,
-// plus symbol_by_name would never match them anyway.
+// symbols() covers both .symtab and .dynsym. Nameless entries -- section and file
+// symbols -- are dropped, since symbol_by_name would never match them anyway.
 std::vector<Symbol> read_symbols(const LIEF::ELF::Binary& elf) {
     std::vector<Symbol> out;
     for (const LIEF::ELF::Symbol& sym : elf.symbols()) {
@@ -113,8 +104,7 @@ std::optional<Binary> load_elf(const std::string& path) {
     bin.entry_point = elf->entrypoint();
     bin.file_size = file_size_on_disk(path);
 
-    // header() on an ELF::Binary hands back the ELF-specific header, so go
-    // through the abstract one to get the architecture in a format-agnostic way.
+    // header() gives the ELF-specific one, so go through the abstract header.
     LIEF::Header header = LIEF::Header::from(*elf);
     bin.arch = arch_name(header.architecture());
 

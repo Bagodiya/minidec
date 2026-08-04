@@ -9,23 +9,22 @@
 namespace minidec {
 
 // Which executable format a Binary was loaded from. We figure this out from the
-// file's magic bytes when it's opened (phase 2).
+// file's magic bytes when it's opened.
 enum class Format {
     Unknown,
     Elf,
     MachO,
 };
 
-// Rough bucket for a symbol. Mostly we just need to tell code (Function) apart
-// from data (Object); everything we can't classify ends up in Other.
+// Code (Function) against data (Object); anything else lands in Other.
 enum class SymbolKind {
     Function,
     Object,
     Other,
 };
 
-// A named region of the binary, e.g. ".text" or "__TEXT,__text". The addresses
-// here are the virtual addresses the loader would map the section to at runtime.
+// A named region, e.g. ".text" or "__TEXT,__text". Addresses are the virtual
+// ones the loader would map to.
 struct Section {
     std::string name;
     std::uint64_t address = 0;      // virtual address of the first byte
@@ -39,8 +38,7 @@ struct Section {
     }
 };
 
-// One entry of the symbol table: a name pinned to an address, plus its size and
-// a guess at whether it points at code or data.
+// A name pinned to an address, with its size and a guess at code or data.
 struct Symbol {
     std::string name;
     std::uint64_t address = 0;
@@ -48,9 +46,8 @@ struct Symbol {
     SymbolKind kind = SymbolKind::Other;
 };
 
-// Everything we managed to pull out of a binary file. Owns its sections and
-// symbols. This is the hand-off point between the loaders and the analysis
-// passes that come later.
+// A loaded binary, owning its sections and symbols. The hand-off point between
+// the loaders and everything after them.
 struct Binary {
     Format format = Format::Unknown;
     std::string path;  // path the binary was loaded from
@@ -60,8 +57,7 @@ struct Binary {
     std::vector<Section> sections;
     std::vector<Symbol> symbols;
 
-    // Find a section by exact name (e.g. ".text"). Returns nullptr if there's
-    // no such section.
+    // Exact name match, e.g. ".text".
     const Section* section_by_name(std::string_view name) const {
         for (const auto& sec : sections) {
             if (sec.name == name) {
@@ -71,8 +67,7 @@ struct Binary {
         return nullptr;
     }
 
-    // Look up a symbol by exact name. The disasm/cfg commands lean on this to
-    // resolve a --func argument to an address range.
+    // How --func gets resolved to an address range.
     const Symbol* symbol_by_name(std::string_view name) const {
         for (const auto& sym : symbols) {
             if (sym.name == name) {

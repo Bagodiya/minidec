@@ -10,20 +10,15 @@ namespace minidec {
 
 namespace {
 
-// An instruction ends a basic block when it hands control somewhere other than
-// the very next instruction, i.e. a jump or a ret. We deliberately don't count
-// a call here: a call comes back to the instruction right after it, so as far as
-// the intra-function control flow goes the block just keeps running past it.
+// A jump or a ret. Not a call -- that comes back to the next instruction, so the
+// block keeps running past it.
 bool ends_block(const Instruction& insn) {
     return insn.is_jump || insn.is_ret;
 }
 
-// Pull the destination address out of a direct jump. Capstone writes it into the
-// operand text as a plain number (e.g. "0x1140"), so for a pc-relative jump we
-// can just read it back. Indirect jumps (jmp rax, jmp [rip+..]) don't carry an
-// address we can follow statically, so they come back as no target. Same strtoull
-// trick cmd_disasm uses to resolve call names -- if it doesn't eat the whole
-// string it wasn't a bare address and we don't trust it.
+// Capstone writes a direct jump's destination as a plain number, so read it back.
+// Indirect jumps have no static target and come back as nothing. If strtoull
+// doesn't eat the whole string it wasn't an address and we don't trust it.
 std::optional<std::uint64_t> jump_target(const Instruction& insn) {
     if (!insn.is_jump || !insn.is_relative) {
         return std::nullopt;
@@ -38,10 +33,8 @@ std::optional<std::uint64_t> jump_target(const Instruction& insn) {
     return target;
 }
 
-// Flip the edges around. Blocks only record where they go, but both the dominator
-// pass and the loop-body walk need to ask the opposite question -- who comes into
-// this block -- so build the reverse map once and hand it out. Successor addresses
-// always name a block start, so the keys line up with real blocks.
+// Blocks only record where they go, but the dominator pass and the loop-body walk
+// both need the reverse. Successors always name a block start, so the keys line up.
 std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> build_predecessors(const CFG& cfg) {
     std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> predecessors;
     for (const BasicBlock& block : cfg.blocks) {
@@ -52,10 +45,8 @@ std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> build_predecessors
     return predecessors;
 }
 
-// Everything you can actually get to from the entry, found by walking edges
-// forwards. Dead blocks do turn up in real binaries -- padding between functions,
-// a tail the compiler proved unreachable -- and the dominator sets give them a
-// meaningless answer, so callers that care need to be able to filter them out.
+// What's reachable from the entry. Dead blocks are real -- padding, tails the
+// compiler proved unreachable -- and dominators give them a meaningless answer.
 std::unordered_set<std::uint64_t> reachable_blocks(const CFG& cfg) {
     std::unordered_set<std::uint64_t> seen;
     if (cfg.empty() || cfg.block_at(cfg.entry) == nullptr) {
@@ -89,18 +80,15 @@ std::vector<std::uint64_t> find_block_leaders(const std::vector<Instruction>& in
         return leaders;
     }
 
-    // Every jump target has to point at an instruction we actually decoded for it
-    // to split a block, so keep the real addresses around to check against. A
-    // target that lands mid-instruction or outside the function isn't a leader we
-    // can do anything with.
+    // A target only splits a block if it names an instruction we decoded. One
+    // landing mid-instruction or outside the function is no use to us.
     std::unordered_set<std::uint64_t> known;
     known.reserve(instructions.size());
     for (const Instruction& insn : instructions) {
         known.insert(insn.address);
     }
 
-    // Collect into a set first so the three rules can add the same address without
-    // us having to worry about duplicates; we sort it into a plain vector at the end.
+    // A set first, so the three rules can overlap without producing duplicates.
     std::unordered_set<std::uint64_t> found;
 
     // Rule 1: you always enter the function at its first instruction.
@@ -117,9 +105,8 @@ std::vector<std::uint64_t> find_block_leaders(const std::vector<Instruction>& in
             }
         }
 
-        // Rule 3: once a block ends, the next instruction begins a fresh one. That
-        // covers the fall-through side of a conditional jump and the dead-drop
-        // after an unconditional jump or a ret alike.
+        // Rule 3: whatever follows a block-ender starts a new one. Covers both the
+        // fall-through of a jcc and the dead drop after a jmp or ret.
         if (ends_block(insn) && i + 1 < instructions.size()) {
             found.insert(instructions[i + 1].address);
         }
@@ -136,17 +123,14 @@ std::vector<BasicBlock> group_into_blocks(const std::vector<Instruction>& instru
         return blocks;
     }
 
-    // find_block_leaders already gives us every address that has to start a block,
-    // including the instruction right after each jump/ret, so a leader is the only
-    // place we ever need to make a cut. Drop them into a set for quick lookups.
+    // Leaders are the only places we ever cut, so a set for quick lookups.
     std::vector<std::uint64_t> leaders = find_block_leaders(instructions);
     std::unordered_set<std::uint64_t> is_leader(leaders.begin(), leaders.end());
 
     BasicBlock current;
     for (const Instruction& insn : instructions) {
-        // Hitting a leader means the previous block is done. Push what we've got
-        // and start collecting a new one from here. The very first instruction is
-        // a leader too, but current is still empty then so there's nothing to push.
+        // A leader ends the previous block. The first instruction is a leader too,
+        // but current is empty then so there's nothing to push.
         if (is_leader.count(insn.address) && !current.empty()) {
             blocks.push_back(std::move(current));
             current = BasicBlock{};
@@ -168,20 +152,17 @@ std::vector<BasicBlock> group_into_blocks(const std::vector<Instruction>& instru
 }
 
 void connect_blocks(std::vector<BasicBlock>& blocks) {
-    // Every edge we add has to name the start of a real block, so collect the set
-    // of block-start addresses up front and check each candidate target against it.
-    // A jump that lands anywhere else (outside the function, mid-instruction) just
-    // doesn't get an edge -- we've got nothing of ours to point it at.
+    // Every edge has to name a real block start, so check each target against this.
+    // Anything landing elsewhere gets no edge.
     std::unordered_set<std::uint64_t> block_starts;
     block_starts.reserve(blocks.size());
     for (const BasicBlock& block : blocks) {
         block_starts.insert(block.start);
     }
 
-    // Because the blocks are contiguous, a block's end address is exactly where the
-    // next block begins, so block.end is the fall-through target whenever there is
-    // one. The last block of the function ends past the final instruction and no
-    // block starts there, which is how "falls off the end" comes out with no edge.
+    // Blocks are contiguous, so block.end is the fall-through target. The last one
+    // ends past the final instruction where no block starts, which is how "falls off
+    // the end" comes out with no edge.
     for (BasicBlock& block : blocks) {
         if (block.empty()) {
             continue;
@@ -195,9 +176,7 @@ void connect_blocks(std::vector<BasicBlock>& blocks) {
         }
 
         if (term.is_jump) {
-            // "jmp" is the only unconditional jump; everything else that's a jump
-            // is a jcc, which also carries on to the next block when the condition
-            // comes out false, so it picks up the fall-through edge as well.
+            // jmp is the only unconditional one; a jcc also falls through.
             bool conditional = term.mnemonic != "jmp";
 
             if (auto target = jump_target(term)) {
@@ -212,9 +191,8 @@ void connect_blocks(std::vector<BasicBlock>& blocks) {
             continue;
         }
 
-        // No branch at the tail at all: this block was cut short only because the
-        // instruction after it is a leader (something jumps there). Control runs
-        // straight on into whatever block starts where this one ends.
+        // No branch at the tail: cut short only because something jumps to the next
+        // instruction. Control runs straight on.
         if (block_starts.count(block.end)) {
             block.successors.push_back(block.end);
         }
@@ -237,9 +215,8 @@ DominatorSets compute_dominators(const CFG& cfg) {
         everything.insert(block.start);
     }
 
-    // Start pessimistic: every block is dominated by every block. The entry is the
-    // exception -- nothing comes before it, so only it dominates it, and that's the
-    // fixed point the rest of the sets get whittled down from.
+    // Start pessimistic and whittle down. The entry is the exception: nothing comes
+    // before it, so only it dominates it.
     for (const BasicBlock& block : cfg.blocks) {
         dominators[block.start] = everything;
     }
@@ -259,8 +236,7 @@ DominatorSets compute_dominators(const CFG& cfg) {
                 continue;  // unreachable, leave it dominated by everything
             }
 
-            // Intersect the predecessors' sets by starting from the first one and
-            // dropping anything the rest don't also have.
+            // Intersect: start from the first predecessor, drop what the rest lack.
             std::unordered_set<std::uint64_t> updated = dominators[preds->second.front()];
             for (std::size_t i = 1; i < preds->second.size(); ++i) {
                 const std::unordered_set<std::uint64_t>& other = dominators[preds->second[i]];
@@ -290,8 +266,7 @@ std::vector<NaturalLoop> find_natural_loops(const CFG& cfg, const DominatorSets&
         build_predecessors(cfg);
     std::unordered_set<std::uint64_t> reachable = reachable_blocks(cfg);
 
-    // Blocks are already sorted by address, so going through them in order is what
-    // makes the loop list come out the same way every run.
+    // Blocks are sorted by address, which is what makes the list deterministic.
     for (const BasicBlock& block : cfg.blocks) {
         if (!reachable.count(block.start)) {
             continue;
@@ -303,9 +278,8 @@ std::vector<NaturalLoop> find_natural_loops(const CFG& cfg, const DominatorSets&
         }
 
         for (std::uint64_t succ : block.successors) {
-            // The whole test: we're jumping to a block that dominates us. A block
-            // dominates itself, so a one-block loop (jmp to its own start) falls
-            // out of this too without needing a special case.
+            // The whole test. A block dominates itself, so a one-block loop falls
+            // out without a special case.
             if (!doms->second.count(succ)) {
                 continue;
             }
@@ -314,10 +288,8 @@ std::vector<NaturalLoop> find_natural_loops(const CFG& cfg, const DominatorSets&
             loop.header = succ;
             loop.latch = block.start;
 
-            // Seed the body with the header before anything else. The walk below
-            // only ever adds blocks it hasn't seen, so having the header in there
-            // already is what stops it from stepping over the top of the loop and
-            // dragging in the whole function above it.
+            // Seed with the header first. The walk only adds unseen blocks, so this
+            // is what stops it climbing past the top of the loop.
             loop.body.insert(loop.header);
 
             std::vector<std::uint64_t> worklist;
@@ -325,9 +297,7 @@ std::vector<NaturalLoop> find_natural_loops(const CFG& cfg, const DominatorSets&
                 worklist.push_back(loop.latch);
             }
 
-            // Anything that reaches the latch without passing the header is inside
-            // the loop, so climb the predecessor edges from the latch and take
-            // everything the walk touches.
+            // Anything reaching the latch without passing the header is inside.
             while (!worklist.empty()) {
                 std::uint64_t current = worklist.back();
                 worklist.pop_back();
@@ -356,10 +326,8 @@ std::vector<std::uint64_t> compute_reverse_postorder(const CFG& cfg) {
         return order;
     }
 
-    // The search is written out with an explicit stack instead of recursing. What
-    // makes that fiddly for a postorder is that we have to come back to a block
-    // after each successor finishes, so a frame remembers which successor we were
-    // up to and we only write the block down once that counter runs off the end.
+    // Explicit stack rather than recursion. A frame remembers which successor it
+    // was up to, and the block is recorded once that counter runs off the end.
     struct Frame {
         std::uint64_t block = 0;
         std::size_t next_successor = 0;
@@ -379,18 +347,16 @@ std::vector<std::uint64_t> compute_reverse_postorder(const CFG& cfg) {
             std::uint64_t succ = block->successors[frame.next_successor];
             ++frame.next_successor;
 
-            // Mark on the way in, not on the way out. A loop means we'll meet the
-            // header again from inside the body, and without this the walk would
-            // just keep going round. Note the push invalidates frame, which is why
-            // we're done with it by here.
+            // Mark on the way in: a loop means meeting the header again from inside
+            // the body. The push invalidates `frame`, so we're done with it here.
             if (visited.insert(succ).second && cfg.block_at(succ) != nullptr) {
                 stack.push_back(Frame{succ, 0});
             }
             continue;
         }
 
-        // Out of successors, so everything below this block is already recorded and
-        // it's this one's turn. That's the postorder; the reverse comes after.
+        // Out of successors, so everything below is recorded and it's this one's
+        // turn. Reversed at the end.
         order.push_back(frame.block);
         stack.pop_back();
     }
