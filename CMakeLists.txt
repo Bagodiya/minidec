@@ -16,9 +16,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
     add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# Capstone does the actual instruction decoding later on. Nothing links
-# against it yet, but look for it now so the build stops here with a clear
-# message instead of failing in the middle of a later disasm step.
+# Capstone does the instruction decoding. Look for it up front so a missing
+# install stops the build here with something readable instead of a pile of
+# missing-header errors.
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
     pkg_check_modules(CAPSTONE QUIET capstone)
@@ -61,9 +61,9 @@ endif()
 # error the moment anything links LIEF::LIEF.
 find_package(tl-expected QUIET CONFIG)
 
-# LIEF handles the ELF/Mach-O parsing in phase 2. It ships its own cmake
-# config, so find_package picks up the imported target on both Homebrew and
-# apt installs. Same idea as capstone above: check now, fail with a hint.
+# LIEF handles the ELF/Mach-O parsing. It ships its own cmake config, so
+# find_package picks up the imported target on both Homebrew and apt installs.
+# Same idea as capstone above: check now, fail with a hint.
 find_package(LIEF QUIET CONFIG)
 if(LIEF_FOUND)
     message(STATUS "minidec: found LIEF ${LIEF_VERSION}")
@@ -80,6 +80,7 @@ add_executable(minidec
     src/cmd_symbols.cpp
     src/cmd_disasm.cpp
     src/cmd_cfg.cpp
+    src/cmd_ir.cpp
     src/elf_loader.cpp
     src/macho_loader.cpp
     src/disasm.cpp

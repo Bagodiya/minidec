@@ -8,36 +8,25 @@
 
 namespace minidec {
 
-// The low-level IR everything from here on works on. x86-64 is far too big and
-// too irregular to analyse directly -- one "add" can write four flags, an
-// operand can hide a whole base+index*scale+disp address calculation, and the
-// same operation shows up under a dozen different encodings. So instead of
-// teaching every later pass about all of that, we lift each machine instruction
-// into a short run of these much simpler operations once, and the passes only
-// ever see the simple version.
+// The IR everything downstream works on. x86-64 is too irregular to analyse
+// directly -- one "add" writes four flags, an operand can hide a whole
+// base+index*scale+disp calculation -- so each instruction is lifted once into a
+// run of much simpler operations.
 //
-// Two rules keep it simple enough to be worth the trouble:
+// Two rules:
 //
-//   1. Every operation does exactly one thing. If an x86 instruction has a side
-//      effect (setting flags, bumping a register) that becomes its own separate
-//      IR operation, so nothing is implicit.
-//   2. Only load and store touch memory. Everything else works on registers,
-//      temporaries and constants. An address is worked out with ordinary
-//      arithmetic into a temporary first, and that temporary is what gets handed
-//      to the load or store.
+//   1. Every operation does exactly one thing. Side effects become their own
+//      operations, so nothing is implicit.
+//   2. Only load and store touch memory. Addresses are computed into a temporary
+//      first, and that temporary is what the load or store takes.
 //
-// Rule 2 is the one that pays off later: because no operand can hide a memory
-// address inside it, the use-def pass (step 45) and SSA construction (step 46)
-// can find every value an operation reads just by walking its argument list,
-// without having to know anything about addressing modes.
+// Rule 2 is what pays off: with no address hidden inside an operand, use-def and
+// SSA can find every value an operation reads by walking its argument list.
 
-// The width an operation works at. Everything in x86-64 is a fixed-width bit
-// pattern, so the type is really just a size -- there's no signedness here on
-// purpose. Whether a value is treated as signed is a property of the operation,
-// not the value, which is why div_s and div_u are separate opcodes below.
+// The width an operation works at. No signedness: that's a property of the
+// operation, not the value, which is why div_s and div_u are separate opcodes.
 //
-// i1 is the odd one out at one bit wide: it's what comparisons produce and what
-// the flag registers hold, so a conditional branch reads an i1.
+// i1 is what comparisons produce and what the flag registers hold.
 enum class IrType {
     none,  // the operation produces no value at all (store, jump, ret)
     i1,
@@ -72,6 +61,29 @@ inline unsigned type_bits(IrType type) {
     return 0;
 }
 
+// none prints as "-" so a listing keeps its columns.
+inline const char* type_name(IrType type) {
+    switch (type) {
+    case IrType::none:
+        return "-";
+    case IrType::i1:
+        return "i1";
+    case IrType::i8:
+        return "i8";
+    case IrType::i16:
+        return "i16";
+    case IrType::i32:
+        return "i32";
+    case IrType::i64:
+        return "i64";
+    case IrType::f32:
+        return "f32";
+    case IrType::f64:
+        return "f64";
+    }
+    return "?";
+}
+
 // What an operand actually refers to.
 enum class OperandKind {
     none,  // an unused slot, e.g. the dst of an operation that returns nothing
@@ -80,20 +92,16 @@ enum class OperandKind {
     imm,   // a constant baked into the instruction
 };
 
-// One input or output of an operation. Deliberately small and flat: no nesting,
-// no memory addressing, no sub-expressions. An operation's arguments are just a
-// list of these, and that's the whole story of what it reads.
+// One input or output. Flat by design: no nesting, no addressing, no
+// sub-expressions, so an operation's argument list is the whole story of what it
+// reads.
 //
-// Machine registers are held as a name rather than an enum so we can take
-// whatever capstone hands us without maintaining a table of every x86 register
-// and its aliases. It also means the flags come along for free -- "zf", "sf" and
-// friends are just i1 registers as far as the IR cares, which is exactly how the
-// lifter models the flag writes an arithmetic instruction does.
+// Registers are held by name rather than as an enum, which avoids maintaining a
+// table of every x86 register and its aliases, and means the flags come along
+// free as i1 registers.
 //
-// Temporaries are the values that only exist inside the IR: the address a load
-// reads from, the intermediate result of a two-step operation, anything without
-// a machine register to live in. They're numbered per function and never reused,
-// so a temp id identifies one value for the whole function.
+// Temporaries are values that only exist in the IR. Numbered per function and
+// never reused, so an id identifies one value throughout.
 struct IrOperand {
     OperandKind kind = OperandKind::none;
     IrType type = IrType::none;
@@ -109,9 +117,8 @@ struct IrOperand {
     bool is_const() const { return kind == OperandKind::imm; }
 };
 
-// Building operands by hand is tedious enough that the lifter would be mostly
-// boilerplate without these. Free functions rather than constructors so
-// IrOperand stays a plain aggregate that can still be brace-initialised.
+// Free functions rather than constructors, so IrOperand stays a plain aggregate
+// that can still be brace-initialised.
 inline IrOperand make_reg(std::string name, IrType type) {
     IrOperand operand;
     operand.kind = OperandKind::reg;
@@ -136,15 +143,11 @@ inline IrOperand make_imm(std::uint64_t value, IrType type) {
     return operand;
 }
 
-// The operation set. Kept small on purpose: every one of these has to be handled
-// by every pass that walks the IR, so a new opcode has a real cost and only
-// earns its place if it can't be built out of the ones already here. Anything
-// x86 can do that isn't in this list gets lifted into a sequence of these
-// instead.
+// Kept small on purpose: every pass that walks the IR has to handle every
+// opcode, so a new one only earns its place if it can't be built from these.
 //
-// The signed and unsigned versions of divide, remainder, shift-right and compare
-// are split because the operands carry a width but no signedness -- the
-// operation is the only place that information can live.
+// Signed and unsigned divide, remainder, shift-right and compare are split
+// because operands carry width but no signedness.
 enum class Opcode {
     nop,     // does nothing; a padding or placeholder slot
     assign,  // dst = arg0, a plain copy between registers/temps
@@ -204,9 +207,7 @@ enum class Opcode {
     unknown,
 };
 
-// Opcode name for printing, matching the enumerator spelling. Mostly for
-// debugging and test failure output -- the pseudocode emitter in phase 7 prints
-// C, not this.
+// For debugging and test failure output.
 inline const char* opcode_name(Opcode op) {
     switch (op) {
     case Opcode::nop:
@@ -279,10 +280,8 @@ inline const char* opcode_name(Opcode op) {
     return "?";
 }
 
-// Whether this opcode writes a destination. The ones that don't are the stores,
-// the control-flow operations and nop. A call is in the yes column even though
-// plenty of calls throw the result away -- whether the dst slot is filled in is
-// up to the lifter, this only says the opcode is allowed one.
+// Whether the opcode is allowed a destination. A call counts even though plenty
+// discard the result -- whether dst is filled in is the lifter's business.
 inline bool has_result(Opcode op) {
     switch (op) {
     case Opcode::nop:
@@ -297,26 +296,20 @@ inline bool has_result(Opcode op) {
     }
 }
 
-// Does control leave the block after this operation? Used when the lifted
-// instructions get grouped back up into blocks.
+// Does control leave the block after this operation?
 inline bool is_terminator(Opcode op) {
     return op == Opcode::jump || op == Opcode::branch || op == Opcode::ret;
 }
 
-// One IR operation. The arguments live in a vector rather than fixed slots
-// because the count genuinely varies -- one for neg, two for add, three for
-// branch, and seven for a call, which names its target and then every register
-// the calling convention could have handed an argument in.
+// One IR operation. Arguments live in a vector because the count varies: one for
+// neg, two for add, three for branch, seven for a call.
 //
-// type is the width the operation works at, which isn't always the width of its
-// arguments: a cmp reads two i64s and produces an i1, and a trunc's type is what
-// it's narrowing to. Where they do agree it's still worth having spelled out,
-// since it saves every pass from reaching into args[0] to find out.
+// `type` is the width the operation works at, which isn't always its arguments'
+// width -- a cmp reads two i64s and produces an i1.
 //
-// address is the machine instruction this came from, and several operations
-// lifted out of the same instruction all carry the same one. It's what lets the
-// output stage line pseudocode back up against the disassembly, so it's worth
-// keeping even though no analysis pass needs it.
+// `address` is the machine instruction this came from; several operations from
+// the same instruction share it. No analysis pass needs it, but it's what lets
+// output line up against the disassembly.
 struct IrInst {
     Opcode op = Opcode::nop;
     IrType type = IrType::none;

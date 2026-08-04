@@ -11,8 +11,8 @@ std::string version_string() {
 }
 
 std::string help_text() {
-    // Keep this in sync with the subcommands as they get added. For now only the
-    // skeleton exists, so we just advertise what's planned.
+    // Only list what run() will actually dispatch. Advertising a command that
+    // isn't wired up yet just moves the failure from here to an error message.
     std::string out;
     out += "usage: minidec <command> [options]\n";
     out += "\n";
@@ -20,7 +20,7 @@ std::string help_text() {
     out += "  symbols     list the symbols in a binary\n";
     out += "  disasm      disassemble a function\n";
     out += "  cfg         show a function's control-flow graph\n";
-    out += "  decompile   emit C-like pseudocode for a function\n";
+    out += "  ir          show the IR a function lifts to\n";
     out += "\n";
     out += "options:\n";
     out += "  --version   print the version and exit\n";
@@ -80,6 +80,9 @@ int run(const ParsedArgs& args) {
     }
     if (args.command == "cfg") {
         return cmd_cfg(args);
+    }
+    if (args.command == "ir") {
+        return cmd_ir(args);
     }
 
     std::cerr << "unknown command: " << args.command << "\n";
