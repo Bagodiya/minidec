@@ -24,11 +24,18 @@ namespace minidec {
 //
 // Only a small slice of x86 is handled so far -- moves between registers,
 // constants and memory, nop, the integer arithmetic that works register to
-// register, and the jumps. Everything else becomes a single Opcode::unknown,
-// which is deliberate: an instruction we can't model yet still shows up in the
-// right place in the stream, so the passes downstream see a gap rather than a
-// wrong answer, and the function around it stays analysable. Calls are the next
-// thing to go in, in step 44.
+// register, the jumps, and calls and returns. Everything else becomes a single
+// Opcode::unknown, which is deliberate: an instruction we can't model yet still
+// shows up in the right place in the stream, so the passes downstream see a gap
+// rather than a wrong answer, and the function around it stays analysable.
+//
+// Calls and returns are the first place the lifter has to know something the
+// instruction itself doesn't say. "call rax" carries no operands and "ret"
+// carries nothing at all, but both move values across the boundary, and where
+// those values live is decided by the System V calling convention rather than by
+// the encoding. So the lifter writes the convention's registers into the
+// operation, and the two passes that care about arity (steps 51 and 52) narrow
+// what's there rather than having to work it out from nothing.
 
 // The pieces of an x86 memory operand once the text has been picked apart --
 // base register, scaled index, displacement and the width being accessed. Only
@@ -76,6 +83,8 @@ private:
     bool lift_div(const Instruction& insn, bool is_signed, std::vector<IrInst>& out);
     bool lift_jmp(const Instruction& insn, std::vector<IrInst>& out);
     bool lift_jcc(const Instruction& insn, std::vector<IrInst>& out);
+    bool lift_call(const Instruction& insn, std::vector<IrInst>& out);
+    bool lift_ret(const Instruction& insn, std::vector<IrInst>& out);
 
     // Work out the i1 a conditional jump is testing and hand back the operand
     // holding it, which for the single-flag conditions is just the flag register

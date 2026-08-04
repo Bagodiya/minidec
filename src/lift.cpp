@@ -1,6 +1,7 @@
 #include "minidec/lift.h"
 
 #include <cstdlib>
+#include <iterator>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -247,6 +248,22 @@ std::optional<std::uint64_t> branch_target(const Instruction& insn) {
     }
     return parse_immediate(trim(insn.op_str));
 }
+
+// Where the System V convention puts the first six integer arguments, in the
+// order they're filled. Anything past the sixth goes on the stack, and floats go
+// in xmm0 upwards, so neither is in here -- the stack arguments are ordinary
+// stores that the lifter has already emitted by the time the call comes round,
+// and the IR has no xmm registers to name.
+//
+// Nothing in the instruction says how many of these a particular call actually
+// reads, and there's no way to find out without looking at the callee. So the
+// call operation names all six. That's wrong in the sense that a one-argument
+// call doesn't read rsi, but it's wrong in the safe direction: a use-def pass
+// that thinks a register might be read leaves the code that wrote it alone,
+// where one that thinks it isn't would delete the argument setup of every call
+// it couldn't see through. Step 51 is where the list gets cut down to the
+// arguments a function really takes.
+const char* const argument_registers[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
 
 // What a conditional jump is actually asking about. x86 has thirty-odd of them
 // but only eight distinct questions, because each one comes in a pair: ja is jbe
@@ -992,6 +1009,98 @@ bool Lifter::lift_jcc(const Instruction& insn, std::vector<IrInst>& out) {
     return true;
 }
 
+// call, in the same three forms jmp comes in: a direct address, a register, or a
+// memory reference that has to be read first. That part is lift_jmp again almost
+// line for line -- what makes a call different is everything around the target.
+//
+// The operation ends up with the target as its first argument and the six
+// convention registers after it, and rax as its destination. All seven of those
+// are guesses in the same direction: we say the call might read each argument
+// register and does write rax, because over-stating a read and a write is what
+// keeps a later pass from deleting something the callee needed.
+//
+// Two things this doesn't say, both worth writing down because they'll matter in
+// step 45. The first is that a call clobbers rcx, rdx, rsi, rdi and r8 through
+// r11 as well as rax -- they're caller-saved, so whatever they held before is
+// gone afterwards, and an IrInst has one destination slot and no way to spell
+// that. Until there's somewhere to put it, use-def has to treat a call as
+// clobbering the caller-saved set on its own. The second is a float or a struct
+// coming back somewhere other than rax, which needs the xmm registers the IR
+// doesn't have yet.
+//
+// What it deliberately leaves out is the stack. A call pushes a return address
+// and moves rsp down eight bytes, but the callee's ret takes both back, so from
+// where the caller is standing rsp is exactly where it was. Writing the push out
+// here without the matching pop -- which happens in another function entirely,
+// one we may never have lifted -- would shift every rsp-relative offset after
+// the call by eight and quietly break the stack variables in step 48.
+bool Lifter::lift_call(const Instruction& insn, std::vector<IrInst>& out) {
+    const IrType width = IrType::i64;
+    std::optional<IrOperand> target;
+
+    if (std::optional<std::uint64_t> direct = branch_target(insn)) {
+        target = make_imm(*direct, width);
+    } else {
+        std::vector<std::string_view> operands = split_operands(insn.op_str);
+        if (operands.size() != 1) {
+            return false;
+        }
+
+        if (!is_memory_text(operands[0])) {
+            // "call rax", usually a function pointer or a virtual dispatch. A
+            // narrower register can't hold a 64-bit code address, so anything
+            // but i64 means we misread the operand.
+            std::optional<IrOperand> reg = parse_operand(operands[0], IrType::none);
+            if (!reg || reg->kind != OperandKind::reg || reg->type != width) {
+                return false;
+            }
+            target = *reg;
+        } else {
+            // "call qword ptr [rip + 0x2f42]", which is how a call through the
+            // GOT is written. The address of the function is in the table, not
+            // in the instruction, so load it and call whatever came back.
+            std::optional<MemoryOperand> mem = parse_memory(operands[0]);
+            if (!mem || (mem->width != IrType::none && mem->width != width)) {
+                return false;
+            }
+
+            IrOperand address = emit_address(*mem, insn, out);
+            IrOperand loaded = new_temp(width);
+            out.push_back(make_inst(Opcode::load, width, loaded, {address}, insn.address));
+            target = loaded;
+        }
+    }
+
+    std::vector<IrOperand> args;
+    args.reserve(1 + std::size(argument_registers));
+    args.push_back(*target);
+    for (const char* name : argument_registers) {
+        args.push_back(make_reg(name, width));
+    }
+
+    out.push_back(
+        make_inst(Opcode::call, width, make_reg("rax", width), std::move(args), insn.address));
+    return true;
+}
+
+// ret, which reads rax and leaves.
+//
+// Naming rax is the same bet as naming all six argument registers at a call: a
+// void function leaves nothing meaningful in it, but saying the return reads it
+// keeps whatever computed it alive, and a return value that got thrown away is a
+// much cheaper mistake than a return value that got deleted. Step 52 is where a
+// function that doesn't return anything loses the argument.
+//
+// "ret 0x10" pops that many bytes of arguments on the way out, and we take it
+// without doing anything about the number. Nothing downstream can tell: control
+// has left the function, so the value rsp ends up with isn't read by anything we
+// go on to lift. Refusing it would cost us the whole return for no gain.
+bool Lifter::lift_ret(const Instruction& insn, std::vector<IrInst>& out) {
+    out.push_back(make_inst(Opcode::ret, IrType::none, IrOperand{},
+                            {make_reg("rax", IrType::i64)}, insn.address));
+    return true;
+}
+
 std::vector<IrInst> Lifter::lift(const Instruction& insn) {
     std::vector<IrInst> out;
 
@@ -1036,6 +1145,23 @@ std::vector<IrInst> Lifter::lift(const Instruction& insn) {
 
     if (insn.mnemonic == "jmp") {
         if (lift_jmp(insn, out)) {
+            return out;
+        }
+        out.clear();
+    }
+
+    if (insn.mnemonic == "call") {
+        if (lift_call(insn, out)) {
+            return out;
+        }
+        out.clear();
+    }
+
+    // Only the near return. retf pops a segment selector as well and only turns
+    // up in code that switches privilege levels, which isn't anything we're
+    // going to be handed a function from, so it stays an unknown.
+    if (insn.mnemonic == "ret") {
+        if (lift_ret(insn, out)) {
             return out;
         }
         out.clear();

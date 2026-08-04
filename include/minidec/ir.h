@@ -194,7 +194,8 @@ enum class Opcode {
     jump,    // unconditional, to the address in arg0
     branch,  // arg0 is an i1 condition, arg1 the taken address, arg2 the
              // fall-through address
-    call,    // arg0 is the target address; dst is the return value if it's used
+    call,    // arg0 is the target address, the rest the argument registers the
+             // callee might read; dst is where the return value comes back
     ret,     // arg0 is the returned value, or no arguments if there isn't one
 
     // The escape hatch. An instruction the lifter doesn't handle yet becomes one
@@ -304,8 +305,8 @@ inline bool is_terminator(Opcode op) {
 
 // One IR operation. The arguments live in a vector rather than fixed slots
 // because the count genuinely varies -- one for neg, two for add, three for
-// branch, and a call could name any number of them once we know the calling
-// convention (step 44).
+// branch, and seven for a call, which names its target and then every register
+// the calling convention could have handed an argument in.
 //
 // type is the width the operation works at, which isn't always the width of its
 // arguments: a cmp reads two i64s and produces an i1, and a trunc's type is what
