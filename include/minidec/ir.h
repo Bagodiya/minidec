@@ -110,6 +110,14 @@ struct IrOperand {
     unsigned temp_id = 0;    // temp number when kind == temp
     std::uint64_t imm = 0;   // constant value when kind == imm
 
+    // Which write of that register this is, filled in by the SSA pass and left
+    // at 0 everywhere else. 0 means the value the register already held when the
+    // function started, so a read of it names no write here at all.
+    //
+    // Temporaries don't use it: the lifter never hands the same id out twice, so
+    // they're single-assignment before SSA gets to them.
+    unsigned version = 0;
+
     bool is_none() const { return kind == OperandKind::none; }
 
     // A constant is the only kind we can read a value out of without running

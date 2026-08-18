@@ -256,6 +256,94 @@ DominatorSets compute_dominators(const CFG& cfg) {
     return dominators;
 }
 
+ImmediateDominators compute_immediate_dominators(const CFG& cfg,
+                                                 const DominatorSets& dominators) {
+    ImmediateDominators idom;
+    if (cfg.empty()) {
+        return idom;
+    }
+
+    std::unordered_set<std::uint64_t> reachable = reachable_blocks(cfg);
+
+    for (const BasicBlock& block : cfg.blocks) {
+        if (block.start == cfg.entry || !reachable.count(block.start)) {
+            continue;
+        }
+
+        auto doms = dominators.find(block.start);
+        if (doms == dominators.end()) {
+            continue;
+        }
+
+        // Of everything dominating the block, the immediate one is whichever has
+        // the most dominators of its own: they form a chain from the entry down,
+        // so the longest chain is the one that ends closest to us.
+        std::uint64_t best = 0;
+        std::size_t best_depth = 0;
+        bool found = false;
+
+        for (std::uint64_t candidate : doms->second) {
+            if (candidate == block.start) {
+                continue;
+            }
+            auto candidate_doms = dominators.find(candidate);
+            if (candidate_doms == dominators.end()) {
+                continue;
+            }
+            if (!found || candidate_doms->second.size() > best_depth) {
+                best = candidate;
+                best_depth = candidate_doms->second.size();
+                found = true;
+            }
+        }
+
+        if (found) {
+            idom[block.start] = best;
+        }
+    }
+
+    return idom;
+}
+
+DominanceFrontiers compute_dominance_frontiers(const CFG& cfg, const ImmediateDominators& idom) {
+    DominanceFrontiers frontiers;
+    if (cfg.empty()) {
+        return frontiers;
+    }
+
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> predecessors =
+        build_predecessors(cfg);
+
+    for (const BasicBlock& block : cfg.blocks) {
+        auto preds = predecessors.find(block.start);
+        if (preds == predecessors.end() || preds->second.size() < 2) {
+            continue;
+        }
+
+        auto stop = idom.find(block.start);
+        if (stop == idom.end()) {
+            continue;  // entry or unreachable, so there's nothing to climb to
+        }
+
+        for (std::uint64_t pred : preds->second) {
+            // Everything from the predecessor up to (not including) the block's
+            // immediate dominator dominates one way in but not the block itself.
+            std::uint64_t runner = pred;
+            while (runner != stop->second) {
+                frontiers[runner].insert(block.start);
+
+                auto next = idom.find(runner);
+                if (next == idom.end()) {
+                    break;  // ran off the top, which an unreachable pred can do
+                }
+                runner = next->second;
+            }
+        }
+    }
+
+    return frontiers;
+}
+
 std::vector<NaturalLoop> find_natural_loops(const CFG& cfg, const DominatorSets& dominators) {
     std::vector<NaturalLoop> loops;
     if (cfg.empty()) {

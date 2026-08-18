@@ -89,6 +89,31 @@ using DominatorSets = std::unordered_map<std::uint64_t, std::unordered_set<std::
 // of intersecting no predecessors and keeps them from dragging real answers down.
 DominatorSets compute_dominators(const CFG& cfg);
 
+// Each block's parent in the dominator tree: the one block that dominates it and
+// is itself dominated by all its other dominators, so it's the closest of them.
+//
+// Keyed by block start. The entry isn't in the map -- nothing dominates it but
+// itself -- and neither is anything unreachable, whose dominator set is a
+// leftover rather than an answer.
+using ImmediateDominators = std::unordered_map<std::uint64_t, std::uint64_t>;
+
+ImmediateDominators compute_immediate_dominators(const CFG& cfg, const DominatorSets& dominators);
+
+// Where a block's control stops being the only way in. D is in the frontier of B
+// when B dominates one of D's predecessors but not D itself -- so B's values
+// reach D down one edge and something else reaches it down another.
+//
+// That's exactly where two definitions meet, which is why SSA puts its phis
+// here and nowhere else.
+using DominanceFrontiers = std::unordered_map<std::uint64_t, std::unordered_set<std::uint64_t>>;
+
+// Walked the cheap way rather than by comparing dominator sets: for a block with
+// more than one predecessor, climb the dominator tree from each predecessor up
+// to the block's immediate dominator, adding the block to everything passed on
+// the way. Blocks with one predecessor are skipped because the climb from it
+// stops immediately.
+DominanceFrontiers compute_dominance_frontiers(const CFG& cfg, const ImmediateDominators& idom);
+
 // A loop found from a back edge. Nested loops come back separately, and two
 // latches jumping to the same header give two entries.
 struct NaturalLoop {

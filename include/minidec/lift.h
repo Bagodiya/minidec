@@ -2,6 +2,7 @@
 #define MINIDEC_LIFT_H
 
 #include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -32,6 +33,28 @@ struct MemoryOperand;
 // Width of a machine register, or nothing if the name isn't one we know. Covers
 // the integer registers and the flag bits, which the IR treats as i1 registers.
 std::optional<IrType> register_type(std::string_view name);
+
+// The 64-bit register a name is a view of: eax, ax and al all fold onto rax.
+// Anything that isn't part of something wider -- the flags, rip -- comes back
+// unchanged.
+//
+// Exact for the 32-bit forms, which zero the top half anyway. For the 8- and
+// 16-bit ones it's an approximation: writing al leaves the rest of rax alone,
+// but everything downstream will treat the whole register as coming from that
+// write. Compilers hardly ever read a wider register straight after a narrow
+// write, so it's a cheap price for one entry per register instead of one per
+// spelling.
+//
+// Use-def and SSA both key registers off this. They have to agree on it, or the
+// two disagree about which name refers to which value.
+std::string_view whole_register(std::string_view name);
+
+// What the System V convention lets a call leave changed. The callee has to put
+// rbx, rbp, rsp and r12-r15 back before it returns, so a value in one of those
+// survives a call; everything else here, flags included, does not.
+//
+// 64-bit names only, which is what whole_register() gives you.
+const std::vector<std::string>& caller_saved_registers();
 
 // Carries the temp counter across instructions. Temps are numbered per function
 // and never reused, so use one Lifter per function and reset() between them.

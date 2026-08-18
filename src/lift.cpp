@@ -483,6 +483,49 @@ std::optional<IrType> register_type(std::string_view name) {
     return numbered_register_type(name);
 }
 
+std::string_view whole_register(std::string_view name) {
+    static const std::unordered_map<std::string_view, std::string_view> parts = {
+        {"eax", "rax"}, {"ebx", "rbx"}, {"ecx", "rcx"}, {"edx", "rdx"},
+        {"esi", "rsi"}, {"edi", "rdi"}, {"ebp", "rbp"}, {"esp", "rsp"},
+
+        {"ax", "rax"},  {"bx", "rbx"},  {"cx", "rcx"},  {"dx", "rdx"},
+        {"si", "rsi"},  {"di", "rdi"},  {"bp", "rbp"},  {"sp", "rsp"},
+
+        {"al", "rax"},  {"bl", "rbx"},  {"cl", "rcx"},  {"dl", "rdx"},
+        {"ah", "rax"},  {"bh", "rbx"},  {"ch", "rcx"},  {"dh", "rdx"},
+        {"sil", "rsi"}, {"dil", "rdi"}, {"bpl", "rbp"}, {"spl", "rsp"},
+    };
+
+    auto it = parts.find(name);
+    if (it != parts.end()) {
+        return it->second;
+    }
+
+    // r8 through r15 spell their width as a suffix, so one rule covers the
+    // twenty-four names the table would otherwise have to list.
+    if (name.size() < 3 || name.front() != 'r') {
+        return name;
+    }
+    char suffix = name.back();
+    if (suffix != 'd' && suffix != 'w' && suffix != 'b') {
+        return name;
+    }
+    for (char c : name.substr(1, name.size() - 2)) {
+        if (c < '0' || c > '9') {
+            return name;
+        }
+    }
+    return name.substr(0, name.size() - 1);
+}
+
+const std::vector<std::string>& caller_saved_registers() {
+    static const std::vector<std::string> registers = {
+        "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11",
+        "cf",  "pf",  "af",  "zf",  "sf",  "of",
+    };
+    return registers;
+}
+
 IrOperand Lifter::new_temp(IrType type) {
     return make_temp(next_temp_++, type);
 }
