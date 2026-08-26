@@ -17,6 +17,7 @@ add_executable(minidec_tests
     test_lift_seq.cpp
     test_stack.cpp
     test_regvar.cpp
+    test_datatype.cpp
     ${CMAKE_SOURCE_DIR}/src/cli.cpp
     ${CMAKE_SOURCE_DIR}/src/cmd_symbols.cpp
     ${CMAKE_SOURCE_DIR}/src/cmd_disasm.cpp
@@ -31,6 +32,7 @@ add_executable(minidec_tests
     ${CMAKE_SOURCE_DIR}/src/ssa.cpp
     ${CMAKE_SOURCE_DIR}/src/stack.cpp
     ${CMAKE_SOURCE_DIR}/src/regvar.cpp
+    ${CMAKE_SOURCE_DIR}/src/datatype.cpp
 )
 target_link_libraries(minidec_tests PRIVATE Catch2::Catch2WithMain LIEF::LIEF ${CAPSTONE_LIBRARIES})
 target_include_directories(minidec_tests PRIVATE ${CMAKE_SOURCE_DIR}/include ${CAPSTONE_INCLUDE_DIRS})
