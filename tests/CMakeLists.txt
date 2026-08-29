@@ -37,6 +37,7 @@ add_executable(minidec_tests
     ${CMAKE_SOURCE_DIR}/src/datatype.cpp
     ${CMAKE_SOURCE_DIR}/src/params.cpp
     ${CMAKE_SOURCE_DIR}/src/retval.cpp
+    ${CMAKE_SOURCE_DIR}/src/varname.cpp
 )
 target_link_libraries(minidec_tests PRIVATE Catch2::Catch2WithMain LIEF::LIEF ${CAPSTONE_LIBRARIES})
 target_include_directories(minidec_tests PRIVATE ${CMAKE_SOURCE_DIR}/include ${CAPSTONE_INCLUDE_DIRS})
