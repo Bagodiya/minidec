@@ -20,6 +20,7 @@ add_executable(minidec_tests
     test_datatype.cpp
     test_params.cpp
     test_retval.cpp
+    test_varname.cpp
     ${CMAKE_SOURCE_DIR}/src/cli.cpp
     ${CMAKE_SOURCE_DIR}/src/cmd_symbols.cpp
     ${CMAKE_SOURCE_DIR}/src/cmd_disasm.cpp
