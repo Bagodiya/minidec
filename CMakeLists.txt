@@ -94,6 +94,7 @@ add_executable(minidec
     src/params.cpp
     src/retval.cpp
     src/varname.cpp
+    src/structure.cpp
 )
 target_include_directories(minidec PRIVATE include ${CAPSTONE_INCLUDE_DIRS})
 target_link_libraries(minidec PRIVATE LIEF::LIEF ${CAPSTONE_LIBRARIES})
